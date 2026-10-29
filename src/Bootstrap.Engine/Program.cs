@@ -11,14 +11,25 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
-if (command is "generate" or "serve" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve")
+    if (command is "generate" or "serve" or "compare-prefill")
     {
         using var engine = new QwenEngine(directory, kernelFile, manifestFile);
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
+        if (command == "compare-prefill")
+        {
+            string fixture = string.Concat(Enumerable.Repeat("This sentence is harmless context. ", 100)) + "Reply with only the number: what is 2 + 2?";
+            var tokens = engine.Tokenizer.SimpleChat(fixture);
+            if (tokens.Length <= 512) throw new Exception("Consistency fixture must cross a prefill block boundary");
+            engine.BatchedPrefill = true; var batched = engine.Generate(tokens, 8, false);
+            engine.BatchedPrefill = false; var sequential = engine.Generate(tokens, 8, false);
+            if (!batched.Tokens.SequenceEqual(sequential.Tokens)) throw new Exception("Batched/sequential state-continuity mismatch: " + JsonSerializer.Serialize(new { batched, sequential }));
+            Console.WriteLine(JsonSerializer.Serialize(new { prompt_tokens = tokens.Length, generated = batched.Tokens, text = batched.Text, state_continuity = "passed across 512-token boundary", input_sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(fixture))) }));
+            return;
+        }
         if (command == "serve") { await Api.Run(engine, int.Parse(Option("--port") ?? "17863")); return; }
         var prompt = Option("--prompt") ?? "Say hello in one short sentence.";
         var inputTokens = engine.Tokenizer.SimpleChat(prompt);
