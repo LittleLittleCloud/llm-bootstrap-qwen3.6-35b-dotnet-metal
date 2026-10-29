@@ -36,8 +36,54 @@ patterns and projections plus byte-BPE/chat-template fixtures from an independen
 reference tokenizer. These implementation checks are separate from the repository
 owned acceptance evaluations.
 
-First real-model smoke generation produced `Hello!` with token IDs
-`[9419, 0, 248046]`. This establishes a working minimal generation path only;
-API compatibility, formal performance and general output quality remain unverified.
-The initial prefill processes tokens sequentially; batched optimization remains
-work for the frozen throughput target, not an assumed result.
+## Serve and reproduce
+
+Obtain the complete official checkpoint snapshot at the revision above from
+[Hugging Face](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8/tree/95a723d08a9490559dae23d0cff1d9466213d989).
+Keep model files outside this repository. Startup verifies the weight, tokenizer
+and chat-template hashes before serving. The SDK is pinned in `global.json`.
+
+```sh
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll serve --model-dir /path/to/snapshot --port 17863
+```
+
+The original Kestrel server provides the selected experiment behavior through
+`/v1/models`, `/v1/chat/completions`, `/v1/responses` and `/v1/messages`, including
+streaming and generic model-generated tool calls. It serializes inference and
+resets each request's state. This is an experimental local endpoint, not a
+claim of implementing every optional feature of those APIs.
+
+Default prefill works in blocks of at most 512 tokens, grouping experts on GPU
+and using FP32 SIMD-group matrix operations with vectorized packed-FP8 staging.
+Larger dense tiles reuse decoded weights across 32 prompt tokens. Decode uses
+vectorized GEMV and deterministic SIMD top-eight routing. No FP16/BF16 activation
+substitution is used. A diagnostic `--sequential-prefill` option retains the
+original token-by-token prefill path.
+
+```sh
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll compare-prefill --model-dir /path/to/snapshot
+```
+
+This checks identical generated tokens between default and sequential prefill on
+a 626-token fixture crossing the 512-token boundary. Kernel checks cover all FP8
+byte patterns, independent CPU dot products including partial matrix tiles, and
+routing tie/probability cases. Initial real-model generation produced `Hello!`
+with IDs `[9419,0,248046]`. These checks do not establish numerical equivalence
+to another model implementation or general output quality.
+
+The separate LLM Bootstrap evaluation repository is pinned in the experiment
+contract. Run its complete `engine-api-conformance` before its `engine-throughput`.
+The experiment selects `prefill.in2k.out1,decode.in128.out256`, one warm-up and
+three formal passes, `ignore_eos=true`, no prefix reuse. Exact runtime hashes and
+all favorable/unfavorable measurements belong to the separate results report.
+Do not interpret build/unit checks as throughput or semantic-quality evidence.
+
+For development only, `BOOTSTRAP_PROFILE=1` serializes each dispatch into its own
+command submission and prints aggregated GPU diagnostics on shutdown. This
+substantially changes scheduling/residency and must be unset during formal
+conformance/throughput. It is never a substitute for the repository evaluator.
+
+The baseline uses independently pinned affine8/BF16 MLX-LM and a generic protocol
+adapter; it is not precision-matched to this official FP8/FP32 engine. No controlled
+speedup, SOTA, HumanEval, autonomy or self-hosting claim is made. Model weights,
+binaries and raw private evidence are not in Git.
