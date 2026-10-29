@@ -1,0 +1,337 @@
+{
+  "experiment_id": "2026-10-29-bootstrap-humaneval-001",
+  "status": "frozen",
+  "description": "Supplementary quality-measurement experiment: run the fixed 20-task Pi HumanEval evaluation with three formal repetitions against the independently implemented official-FP8 .NET+Metal engine at 32768-token context. This new evaluation goal is separate from the published 4k synthetic throughput experiment. No quality pass-rate or HumanEval speed floor is invented.",
+  "skills_revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
+  "builder_instruction_hashes": [
+    {
+      "name": "skills/bootstrap-experiment-sop/SKILL.md",
+      "sha256": "523775771093bfc58748c3abc904efeeaca912eb11abfa7a6beceeac7d95e4c6"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/experiment-protocol.md",
+      "sha256": "fa8dd191abe6840fa7ccc5ad5a67c71f7413d01f20185980a80c7cdfd67ed4ce"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/evaluation-protocol.md",
+      "sha256": "460933e2677fad6240c5c48e45584c525ff0617a5c4eca4b1044f3af11c18e2a"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/new-experiment.md",
+      "sha256": "9f3a4a54fd3505d83651d3928b6aa5a8271dde9b54d3cdcb055ee1afbd8f961a"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/plan.md",
+      "sha256": "0b445b3175d80e88cba2184231c05b291051f5776596b9e738ff60ee06e3e19e"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/build.md",
+      "sha256": "28e524e9697c6693aeacec2acfe85e651194314e356935de2eccb915e944e4a2"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/evaluate.md",
+      "sha256": "52a9280e1d78fc251e7a6659389f03e5496383000c9312d45d496e2b5a48147b"
+    },
+    {
+      "name": "builder-task.md (local-only instruction artifact)",
+      "sha256": "d290c4a57308741115d302e3941e7b70156aa68a76459245ab8c828423875303"
+    }
+  ],
+  "contract_frozen_at": "2026-10-29T16:42:37-07:00",
+  "scope": "User-authorized HumanEval testing on the same local M5 Pro and official FP8 model. The user explicitly noted 4096 may be insufficient; use the repository evaluation's 32768 context and 4096 per-request output budget. Implement only necessary context/configuration/API fixes in a separate code PR, preserve precision and original 4k results, then run all 20 tasks with one warm-up and three formal passes. Record all failures and publish a separate reviewed result change; no merge or OS limit/power change is authorized by this test request.",
+  "hardware": {
+    "platform": "Apple M5 Pro",
+    "gpu_cores": 20,
+    "memory_gib": 48,
+    "os_version": "macOS 26.6.2 (25G83); Darwin 25.6.0; Metal 4",
+    "toolchain": ".NET SDK 10.0.100 for candidate; Apple clang 21.0.0 (clang-2100.3.34.2); runtime Metal shader compilation verified on Apple M5 Pro; Metal 4; macOS 26.6.2 (25G83). Baseline: Python 3.12.13, MLX 0.32.4, MLX-LM pinned separately. No offline Metal compiler or system changes required. HumanEval harness: Pi 1.4.0; Docker Desktop 4.79.0 / Docker Engine 29.5.3 linux/arm64; assertion image python@sha256:5fb4bc53dd0180955e31e5245b648bbb24a4ac4ab03a1de81513642325220bcd.",
+    "power": "Observed AC power, battery charged; configured powermode=2 for AC and battery. No power settings modified; re-observe before each run.",
+    "gpu_memory_limit": "OS default; observed recommendedMaxWorkingSetSize=44023414784 bytes (41 GiB), maxBufferLength=30150672384 bytes. No global memory-limit override or forced wiring. Re-observe allocation and pressure during actual runs.",
+    "exclusive_gpu": false
+  },
+  "target_model": {
+    "repository": "Qwen/Qwen3.6-35B-A3B-FP8",
+    "revision": "95a723d08a9490559dae23d0cff1d9466213d989",
+    "file_hash_manifest": [
+      {
+        "name": "layers-0.safetensors",
+        "sha256": "969ed52b6d4a45e1c919115aed81a48a00004625a0406eebf630e829ff97c5bf"
+      },
+      {
+        "name": "layers-1.safetensors",
+        "sha256": "9b6714f0a7b7f9f7ed9eceefc31af655de1863bd83a23d735aa8dbad2cc03dfe"
+      },
+      {
+        "name": "layers-10.safetensors",
+        "sha256": "5cc57c2d6e18830429e2c9ea27a0b7d15e6502c74463d3d4ec6b621c699a5ef8"
+      },
+      {
+        "name": "layers-11.safetensors",
+        "sha256": "0f85558bc82b754230204607f55a3035fd39a6ad4e7f0f5613aa40a632566cab"
+      },
+      {
+        "name": "layers-12.safetensors",
+        "sha256": "0eb974e0b80092a722d10140647aedc14647831007ea7d898b892064c9fb4d0d"
+      },
+      {
+        "name": "layers-13.safetensors",
+        "sha256": "7d4bbdc09e40a3ccfa503c5149c7bb477b07bf8a75ca81613aa68031d995cbf8"
+      },
+      {
+        "name": "layers-14.safetensors",
+        "sha256": "0c6c07e10d047dd742b90fdfdbe734d5b4627fcae7728f8319413194c8d6f171"
+      },
+      {
+        "name": "layers-15.safetensors",
+        "sha256": "786c965fcbc9544aa97524e986ff7e1e2303b6c22812249b283b8c590ada7a77"
+      },
+      {
+        "name": "layers-16.safetensors",
+        "sha256": "dbbaab6eef74ab4f24d374ce94203c8f439019a26d322d8b02fb1cee6ed70267"
+      },
+      {
+        "name": "layers-17.safetensors",
+        "sha256": "29a35db86d591da297ac0ff46f773bf5e5386035172b6c637e00cf0786b0fdc9"
+      },
+      {
+        "name": "layers-18.safetensors",
+        "sha256": "99db8f52e91928e6a362c4510b15112c0c5d2eb0e9279b3413ec1db2016f1b2b"
+      },
+      {
+        "name": "layers-19.safetensors",
+        "sha256": "b1bc3e93c3a22adc01a77b4a2d5e2171e9588e2478ed648526596700ffa566c7"
+      },
+      {
+        "name": "layers-2.safetensors",
+        "sha256": "7ca3668d7dde8c47e796186f9a459afe6f86a60e547bc2f72fcc87543e4a718e"
+      },
+      {
+        "name": "layers-20.safetensors",
+        "sha256": "027f68acf35eb9e9fc41ae12154c18da1b0126bee7eaf16a177cfcbeaafbc7a6"
+      },
+      {
+        "name": "layers-21.safetensors",
+        "sha256": "79205dfb7fe145b26e5941f1b9590a870bc9e1df3127a67bd1ac32f1a12ad75f"
+      },
+      {
+        "name": "layers-22.safetensors",
+        "sha256": "94e7674ffb28f4cd9cf8859c6d0440cbd5d4d3a6dc33193a0442642ae303cd17"
+      },
+      {
+        "name": "layers-23.safetensors",
+        "sha256": "51a7c63c51959faa40c369c80ddac42233cd13d7ad6603e75574bbeeca72e98d"
+      },
+      {
+        "name": "layers-24.safetensors",
+        "sha256": "8c64b42cb8abc93ff5e5ac801c556da6eb81545a151c10320618bae250c9efd9"
+      },
+      {
+        "name": "layers-25.safetensors",
+        "sha256": "18ca830020bd0c7af5f99257112e1c5ba457673d4fd926e6eafcb3127edb06b5"
+      },
+      {
+        "name": "layers-26.safetensors",
+        "sha256": "a3fcd9cfeeb8ef52b749041df0986865cd2b6822a67bd69d0e0692571e49cfde"
+      },
+      {
+        "name": "layers-27.safetensors",
+        "sha256": "48829a4c312ecaf44e03bd9266245549982c326c0311b37694eb29dde4f30c62"
+      },
+      {
+        "name": "layers-28.safetensors",
+        "sha256": "9e40e51e6b2fbd04642cdfe3e66f4936bb74ef880ea8ff5417ec2075c47a938f"
+      },
+      {
+        "name": "layers-29.safetensors",
+        "sha256": "154e2b6da74a5c7921382d1738a57d4a7a9465594f68aa2f7e269340cef27d76"
+      },
+      {
+        "name": "layers-3.safetensors",
+        "sha256": "9ebbd0a7aa2f82f516ec339b66b317f5a7d710d244c42d00f4fea22478bac7da"
+      },
+      {
+        "name": "layers-30.safetensors",
+        "sha256": "292aa0e63dfbd0c757945021b0995b83d7f561985202df9fbfe591c61911f9fa"
+      },
+      {
+        "name": "layers-31.safetensors",
+        "sha256": "21073b1a747d3736b46dc4f84ed66ae287ee3acb699807757a06d77de98af99e"
+      },
+      {
+        "name": "layers-32.safetensors",
+        "sha256": "52e7905b111b6fbfb2b91b9f5b4fd748e61c93cbd39e988d1fabbcd9e00f4f20"
+      },
+      {
+        "name": "layers-33.safetensors",
+        "sha256": "bcc4ad3526f6bb99ae9af57cc319da6bfd69228e5d0bcbd678590323f240cccb"
+      },
+      {
+        "name": "layers-34.safetensors",
+        "sha256": "f52d1343ed110f00a661fcdc17e530a5f3c22a9397469bd2f41e22c8a2ffe9f1"
+      },
+      {
+        "name": "layers-35.safetensors",
+        "sha256": "a079648624f32732831382efa86c72bf03bc58336dcfe6b8ae11f4fcba33e2ea"
+      },
+      {
+        "name": "layers-36.safetensors",
+        "sha256": "f293aff9b2498b7a86303bfb928a03b62b1763bf71f0fe35c14d2d1712292673"
+      },
+      {
+        "name": "layers-37.safetensors",
+        "sha256": "918c26a832494ea368013e5fce8dba0e98923cc62f69d0b21f752dfeb241d404"
+      },
+      {
+        "name": "layers-38.safetensors",
+        "sha256": "2cd43a74c05a8f112c4f137f8139f217601a6035f6474c256b4bac315ccf5c39"
+      },
+      {
+        "name": "layers-39.safetensors",
+        "sha256": "0e347a8527fb41e4dde7e92a359feb0709d770d2b7ab4f2081c940205b85dba9"
+      },
+      {
+        "name": "layers-4.safetensors",
+        "sha256": "3fda002efe01809173b2a9179d529e04f1a9e28d58038cf47fea02b1251c544e"
+      },
+      {
+        "name": "layers-5.safetensors",
+        "sha256": "85f08db02168b263497757002827eb15c44c9ae46962ec26f19a648a0f5fb826"
+      },
+      {
+        "name": "layers-6.safetensors",
+        "sha256": "0601aa7cd21d29efdd6330614aaff2b9a7e4b599d1de894fdb50525033c8725a"
+      },
+      {
+        "name": "layers-7.safetensors",
+        "sha256": "ec6d9082f26b2e3d6010114cac16d71626836a53812782690bce582bf2baac51"
+      },
+      {
+        "name": "layers-8.safetensors",
+        "sha256": "a4284bb825ff85f6166208edfb8315897771db03dae82a078bc69014c695502a"
+      },
+      {
+        "name": "layers-9.safetensors",
+        "sha256": "f2bc291ccdccde1094f34e5d2f506e2b8a3857327faa9ffbd2d3a5d75de9d23a"
+      },
+      {
+        "name": "mtp.safetensors",
+        "sha256": "3e9c9fef90a5c02314cf27eeccc72f9f61ce711c12c869244c7127c787b5bd7d"
+      },
+      {
+        "name": "outside.safetensors",
+        "sha256": "bb9755bc8ebd638e6a9994ae75064f9a6ac3f56541c00a10a90b7a930d24cc4f"
+      }
+    ],
+    "tokenizer_hash": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "chat_template_hash": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+    "weights": "Official FP8 E4M3 checkpoint, 128x128 block scaling, with excluded BF16 tensors. Weight-only FP8 storage with FP32 math; no affine INT8/INT4 substitution. Text inference only, greedy, thinking disabled, no vision/MTP path, 32768-token served window for this quality experiment. MTP and vision tensors are not executed.",
+    "activation_precision": "FP32 activations and accumulation; FP8 E4M3 checkpoint weights remain packed and are decoded in Metal kernels. Excluded BF16 tensors retain their source values and are promoted to FP32 for computation.",
+    "kv_precision": "FP32 KV; 32768-token served context; unscaled text RoPE; request-isolated reset. No KV quantization or OS memory-limit override.",
+    "recurrent_state_precision": "FP32 recurrent state and depthwise-convolution state, consistent with the official mamba_ssm_dtype=float32 configuration.",
+    "speculative_decoding": false,
+    "speculative_draft": {
+      "not_applicable": true,
+      "reason": "Speculative decoding is disabled; no draft model is used."
+    }
+  },
+  "builder": {
+    "model": "GPT-6-family Codex assistant in this conversation; the exact deployed model name is not exposed to the assistant.",
+    "provider": "OpenAI",
+    "revision_or_exposed_identifier": {
+      "unavailable": true,
+      "reason": "The provider does not expose an immutable runtime model revision or exact deployment identifier to this assistant."
+    },
+    "initial_inference_location": "OpenAI-hosted Codex inference; exact deployment location is unavailable. Routing remains with the Codex host; no self-hosting claim.",
+    "sampling_settings": {
+      "temperature": "Provider-controlled; not exposed to the assistant.",
+      "seed": "Not exposed to the assistant."
+    },
+    "network_and_source_access": "Local terminal/filesystem, official Hugging Face model files, GitHub source and Git tools, package registries for declared baseline/development tools. Baseline source inspection permitted; existing inference backends prohibited in the candidate."
+  },
+  "development_harness": {
+    "name": "Codex desktop conversation and its local execution tools",
+    "version": "Desktop build version not exposed; local codex-cli 0.157.0 observed.",
+    "revision_or_package_hash": {
+      "unavailable": true,
+      "reason": "The running desktop harness does not expose an immutable package hash to this assistant; the CLI observation is not treated as the desktop identity."
+    }
+  },
+  "evaluation": {
+    "definition": {
+      "evaluation_id": "humaneval-20-pi",
+      "revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
+      "sha256": "933285b68d72f20497ce7cd6c5d8d53856f76aa50bb06b4c16bf187e34623ae9"
+    },
+    "warmup_plan": "One warm-up pass of the first two repository-defined tasks, excluded from formal quality/timing. Three formal passes each cover all 20 fixed tasks; no --tasks subset. Fresh Pi process/workspace per task, thinking off, default engine greedy sampling. Complete engine-api-conformance with --context-window 32768 before HumanEval.",
+    "formal_repetitions": 3
+  },
+  "implementation": {
+    "starting_scaffold": "Continue own engine source f51d0ac885758e3b1735a7549e3a35497d472f1b in the separate llm-bootstrap-qwen3.8-35b-engine repository; merged main 70ddcb30188bcfd2d12ca4e81f3bb18bbba80dfc has identical tree. Reuse this independently built implementation and add context configuration/required fixes. Existing external inference backends remain prohibited as candidate backend.",
+    "language_and_backend": ".NET 10 / C# with original Metal compute kernels and a minimal original Objective-C/C ABI bridge calling platform APIs. Runtime Metal compilation verified. Host CPU performs tokenization, API/control, and sampling only; no CPU model-computation fallback.",
+    "allowed_libraries": [
+      ".NET SDK 10.0.100 and .NET 10 runtime / Microsoft.AspNetCore.App shared framework",
+      "System.Text.Json and System.Text.RegularExpressions from the .NET runtime",
+      "Apple Metal and Foundation frameworks through an original native bridge",
+      "macOS libc for file mapping and native allocation"
+    ],
+    "baseline_source_inspection_allowed": true,
+    "existing_engine_backend_allowed": false
+  },
+  "baselines": {
+    "selection_date": "2026-10-29",
+    "selection_method": "Retain the independently pinned MLX-LM affine8/BF16 baseline selected from official source in the prior experiment. For setup only, rerun its generic adapter at 32768 context, complete conformance, then a one-task HumanEval/156 preflight. It passed 1/1 official assertions and verified sandbox/negative controls. This subset preflight validates plumbing only and is not a full baseline quality estimate or matched-precision comparison. No HumanEval speedup or SOTA claim is planned.",
+    "engines_and_revisions": [
+      {
+        "name": "mlx-lm",
+        "revision": "6b572ab1b531dd8fd2d13f6f36a89c2eccda18ea"
+      },
+      {
+        "name": "mlx-lm-protocol-adapter",
+        "revision": "6992293876fe2e666923f7b19d17747611844a34"
+      }
+    ],
+    "comparison_track": "best-permitted-configuration"
+  },
+  "goal": {
+    "primary_metric": "Official assertions passed / 60 formal task-runs (20 fixed tasks x 3 repetitions), with per-repetition scores and all missing/wrong/unfinished/timed-out tasks retained in the denominator. Report proxy client prefill/decode/TTFT and application duration only when the repository driver makes them available. This is Pi agent-level correctness, not standalone model pass@1. The coverage threshold below is measurement completeness only; no minimum quality pass rate or HumanEval speed floor was supplied.",
+    "performance_thresholds": [
+      {
+        "metric": "formal_task_runs_evaluated",
+        "comparator": "at-least",
+        "threshold": 60,
+        "unit": "task-runs"
+      }
+    ],
+    "quality_gate": "Complete pinned engine-api-conformance at 32768 context before measurement. Run all 20 fixed HumanEval tasks in each of three formal passes using unmodified pinned Pi/evaluator scripts; verify official assertion sandbox and negative control. Record exact assertion pass counts, timeouts, HTTP/API failures, malformed/missing solutions, and usage reconciliation. No numerical equivalence or minimum quality pass rate is required by this measurement request. Never equate campaign-completeness acceptance with all assertions passing.",
+    "resource_limits": {
+      "max_memory_footprint_gib": {
+        "not_applicable": true,
+        "reason": "The user set no additional numeric footprint cap beyond the selected 48 GiB machine and unchanged OS/Metal memory limits. Measure and report footprint/pressure; do not silently raise system limits."
+      },
+      "max_swap_out_delta_gib": {
+        "not_applicable": true,
+        "reason": "No numeric swap-out acceptance cap was set. Measure and report the whole-machine delta; do not attribute it to the engine without evidence or claim swap-free execution."
+      }
+    },
+    "self_hosting_in_scope": false
+  },
+  "budget": {
+    "wall_clock_hours": {
+      "not_applicable": true,
+      "reason": "The user set no fixed wall-clock time cap and instructed the agent to stop on user request. This declares an unbounded budget, not a zero allowance or a measured cost."
+    },
+    "builder_tokens": {
+      "not_applicable": true,
+      "reason": "The user set no fixed builder tokens cap and instructed the agent to stop on user request. This declares an unbounded budget, not a zero allowance or a measured cost."
+    },
+    "api_cost_limit": {
+      "not_applicable": true,
+      "reason": "The user set no fixed API cost cap and instructed the agent to stop on user request. This declares an unbounded budget, not a zero allowance or a measured cost."
+    },
+    "hardware_hours": {
+      "not_applicable": true,
+      "reason": "The user set no fixed hardware hours cap and instructed the agent to stop on user request. This declares an unbounded budget, not a zero allowance or a measured cost."
+    },
+    "stopping_rule": "No fixed budget per the user. Stop on user request; otherwise finish this finite full 20-task, three-formal-pass measurement campaign and report outcomes honestly, including failures. Keep each repository-owned 300-second task timeout and 30-second assertion-container timeout unchanged. Do not keep tuning to a desired score."
+  }
+}
