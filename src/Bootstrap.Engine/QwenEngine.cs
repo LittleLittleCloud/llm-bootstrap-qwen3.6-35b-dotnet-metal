@@ -95,7 +95,7 @@ internal sealed partial class QwenEngine : IDisposable
                 Project(path + ".q_proj", norm, qkv); Project(path + ".k_proj", norm, k); Project(path + ".v_proj", norm, v);
                 gpu.Dispatch("split_q", new(), 4096, 128, qkv, q, qgate);
                 Normalize(q, path + ".q_norm", q, 256, 16); Normalize(k, path + ".k_norm", k, 256, 2);
-                var attentionArgs = new KernelArgs { Position = (uint)position, K = Context, Theta = 10_000_000f };
+                var attentionArgs = new KernelArgs { Position = (uint)position, K = (uint)Context, Theta = 10_000_000f };
                 gpu.Dispatch("rope_cache", attentionArgs, 4096, 128, q, k, v, rotated, keyCache[layer], valueCache[layer]);
                 gpu.Dispatch("attention_scores", attentionArgs, checked((uint)(16 * (position + 1) * 32)), 128, rotated, keyCache[layer], scores);
                 gpu.Dispatch("attention_softmax", attentionArgs, 16 * 256, 256, scores);
