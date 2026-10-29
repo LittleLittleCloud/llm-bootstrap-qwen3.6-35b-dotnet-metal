@@ -1,0 +1,65 @@
+{
+  "run_id": "2026-10-29-baseline-001",
+  "status": "completed",
+  "acceptance": "unverified",
+  "contract": {
+    "path": "experiments/2026-10-29-bootstrap-dogfood-001/contract.json",
+    "revision": "5f7f7099be4a7c261140d6fbc4f800d7065266e1",
+    "sha256": "bbe28f083c4afd6a8593a12dbfb73877e3c605889ab9809dd91d4cbd7ce08adf"
+  },
+  "skills_revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
+  "started_at": "2026-10-29T21:49:00+00:00",
+  "ended_at": "2026-10-29T14:50:46-07:00",
+  "evaluation_results": [
+    {
+      "role": "baseline",
+      "engine_name": "mlx-lm-affine8-protocol-adapter",
+      "path": "experiments/2026-10-29-bootstrap-dogfood-001/runs/2026-10-29-baseline-001/baseline-mlx-lm.json",
+      "sha256": "7e49b547550e43657b423882e2c5089710586ba4ddeb2ef1cf29a57e574c26c4"
+    }
+  ],
+  "comparisons": [],
+  "claims": [],
+  "human_interventions": {
+    "unavailable": true,
+    "reason": "User task-setup choices are summarized in the report; exact original message timestamps are not exposed. No human implementation edits occurred during this baseline run."
+  },
+  "cost": {
+    "builder_tokens": {
+      "unavailable": true,
+      "reason": "Per-run builder token accounting was not exposed."
+    },
+    "elapsed_hours": {
+      "unavailable": true,
+      "reason": "A separate monotonic whole-run observer was not started; evaluator request/measurement durations remain in the result."
+    },
+    "hardware_hours": {
+      "unavailable": true,
+      "reason": "Separate GPU hardware-hour accounting was not instrumented."
+    }
+  },
+  "self_hosting": {
+    "status": "not-in-scope"
+  },
+  "evidence": [
+    {
+      "description": "Complete formal baseline API conformance result: 60 passed, one skipped, zero failed/errored; negative control verified.",
+      "access": "local-only",
+      "sha256": "f1ac8eaa0e643a93039a2dfac998c823764accebdd4f459da761e5fea360855b",
+      "access_limitation": "Kept under ignored experiment evidence; not submitted as a throughput result document."
+    },
+    {
+      "description": "Per-request timings, token counts, and gate outcomes; it holds no prompts or model output",
+      "access": "local-only",
+      "sha256": "9eaa64dc7cb629a758cfc80ce7f236d24850788e62d9e9c56d2d1f81fe8be306",
+      "access_limitation": "Kept next to the result document and not committed to the repository."
+    },
+    {
+      "description": "Baseline runtime source revisions and deployed artifact hashes.",
+      "access": "local-only",
+      "sha256": "626749b727a0540e8d8015c31c910370814cdc41080fef2c34791f708a1d051e",
+      "access_limitation": "Local baseline preparation evidence; adapter source is independently versioned and retained locally."
+    }
+  ],
+  "interpretation": "Frozen-contract formal baseline: all three passes and all six workload requests succeeded, after complete API conformance. Prefill 1723.22 tokens/s; decode 54.76 tokens/s. This is MLX affine8/group64 with BF16 defaults, while the candidate is official FP8/FP32. No matched-precision speedup is claimed. Sampled resident memory excludes some or all GPU allocations and must not be presented as total model footprint. Candidate acceptance remains unverified until its own formal measurements."
+}

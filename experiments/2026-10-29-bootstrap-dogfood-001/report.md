@@ -82,3 +82,9 @@ Baseline preflight used MLX-LM with affine8/group64 weights and BF16 defaults, w
 - Local-only preflight evidence `baseline-runtime-identity.json`: SHA-256 `626749b727a0540e8d8015c31c910370814cdc41080fef2c34791f708a1d051e`.
 
 Remaining work: implement the .NET + Metal candidate; run baseline/candidate formal evaluations serially using this frozen contract; preserve all attempts; report every acceptance criterion and submit reviewed result records in a separate PR.
+
+## Formal baseline result
+
+Frozen contract commit: `5f7f7099be4a7c261140d6fbc4f800d7065266e1`. Run `2026-10-29-baseline-001` completed after the freeze, with complete API conformance (60 pass, one skip, no fail/error) and one throughput warm-up plus three successful formal passes. Prefill: **1723.22 tokens/s**. Decode: **54.76 tokens/s**. All six workload requests passed their gates. These are independent baseline measurements, not candidate results.
+
+The sampled CPU resident footprint was 0.102 GiB, with the evaluator explicitly noting that GPU memory may be excluded; total GPU/model footprint was not obtained. Whole-machine observed swap-out delta during formal passes was 0 bytes. No competing engine process was run during the baseline measurement; general GUI GPU exclusivity is not claimed. The owned baseline server and adapter were stopped after measurement to release GPU resources before candidate development tests.
