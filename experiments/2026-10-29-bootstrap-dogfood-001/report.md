@@ -1,6 +1,6 @@
 # Experiment: 2026-10-29-bootstrap-dogfood-001
 
-Status: Draft (`draft-not-run`). Acceptance: Unverified. No engine implementation or formal model run has started.
+Status: Frozen; candidate build not started. Acceptance: Unverified. Baseline preparation/preflight completed before freeze; no candidate implementation or formal candidate run has started.
 
 ## Question and frozen contract
 
@@ -69,3 +69,16 @@ Local-only `evidence/skill-update.json` SHA-256: `2662bf6585546e5804be82c292f3c1
 Validation log `installed-check-skill-update.txt` SHA-256: `ab6f4601abed36aa97fbfdc0d0bf9ff37c16aa2db6cc35921700957619035979`.
 
 Validation log `schema-check-skill-update.txt` SHA-256: `77515f0715ba6787a4bfa04aa3b3cf6bd86b0e50400000a0795d8e1b8b389d35`.
+
+## Contract freeze and baseline preflight
+
+The contract was completed and frozen at `2026-10-29T14:48:23-07:00`, before writing candidate engine code. The candidate workspace is the empty source revision `5fe496f89f7bd68eeb6ffc2f2f2efef375771c5e`. The baseline protocol adapter is independent baseline preparation and will not be reused by the candidate.
+
+Baseline preflight used MLX-LM with affine8/group64 weights and BF16 defaults, while the candidate is official FP8 with FP32 math/state. This is a disclosed best-permitted-configuration comparison; no matched-precision speedup is claimed. Complete conformance had 60 pass, one skip, zero fail/error, and a verified negative control. The one-pass pre-freeze throughput preflight passed both selected workloads, with prefill 1770.88 tokens/s and decode 55.04 tokens/s. These are baseline preliminary setup observations, not candidate or formal three-repetition results.
+
+- Local-only preflight evidence `conformance-attempt-001.json`: SHA-256 `23477b65c7b5431829920f49ee6614f7e794c61c3c0b797d7f2999ff9bf7d4d1`.
+- Local-only preflight evidence `throughput-attempt-001.json`: SHA-256 `f14ce51769ceddb6dc3d4c754e806e407001a89a026b1b89388b97f0c0d61946`.
+- Local-only preflight evidence `throughput-attempt-001.requests.evidence`: SHA-256 `5518e59e06c7c9b1ea1e8ea887b4db5ac9584b76883fe92c05f2f79831f0eed7`.
+- Local-only preflight evidence `baseline-runtime-identity.json`: SHA-256 `626749b727a0540e8d8015c31c910370814cdc41080fef2c34791f708a1d051e`.
+
+Remaining work: implement the .NET + Metal candidate; run baseline/candidate formal evaluations serially using this frozen contract; preserve all attempts; report every acceptance criterion and submit reviewed result records in a separate PR.

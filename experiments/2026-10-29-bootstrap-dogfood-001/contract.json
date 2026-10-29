@@ -1,20 +1,53 @@
 {
   "experiment_id": "2026-10-29-bootstrap-dogfood-001",
-  "status": "draft-not-run",
+  "status": "frozen",
   "description": "Bring up a self-implemented inference engine for official Qwen3.6-35B-A3B-FP8 on the local Apple M5 Pro (20 GPU cores, 48 GiB unified memory). Planned acceptance targets supplied by the user: prefill >= 500 tokens/s and decode >= 50 tokens/s, in addition to functional and correctness gates. No fixed budget; stop on user request. No candidate measurements have been obtained.",
   "skills_revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
-  "builder_instruction_hashes": null,
-  "contract_frozen_at": null,
-  "scope": "New experiment on the local M5 Pro: bring up a self-implemented inference engine for the user-selected official FP8 checkpoint, with planned prefill >= 500 tokens/s and decode >= 50 tokens/s. Official model/weight discovery is delegated to the agent. The user set no fixed time, token, API cost, or hardware-hour cap and instructed the agent to stop on user request. Contract/evaluation stage gates remain in effect. A baseline may provide an independent reference; an existing inference-engine backend cannot serve as the candidate implementation. Operating-system changes and results publication have not been requested.",
+  "builder_instruction_hashes": [
+    {
+      "name": "skills/bootstrap-experiment-sop/SKILL.md",
+      "sha256": "523775771093bfc58748c3abc904efeeaca912eb11abfa7a6beceeac7d95e4c6"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/experiment-protocol.md",
+      "sha256": "fa8dd191abe6840fa7ccc5ad5a67c71f7413d01f20185980a80c7cdfd67ed4ce"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/evaluation-protocol.md",
+      "sha256": "460933e2677fad6240c5c48e45584c525ff0617a5c4eca4b1044f3af11c18e2a"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/new-experiment.md",
+      "sha256": "9f3a4a54fd3505d83651d3928b6aa5a8271dde9b54d3cdcb055ee1afbd8f961a"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/plan.md",
+      "sha256": "0b445b3175d80e88cba2184231c05b291051f5776596b9e738ff60ee06e3e19e"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/build.md",
+      "sha256": "28e524e9697c6693aeacec2acfe85e651194314e356935de2eccb915e944e4a2"
+    },
+    {
+      "name": "skills/bootstrap-experiment-sop/references/evaluate.md",
+      "sha256": "52a9280e1d78fc251e7a6659389f03e5496383000c9312d45d496e2b5a48147b"
+    },
+    {
+      "name": "builder-task.md (local-only instruction artifact)",
+      "sha256": "54130ceb314e03a46d26f3b4b5b6afc430b5aa33c0c1c73deb627360c23bca30"
+    }
+  ],
+  "contract_frozen_at": "2026-10-29T14:48:23-07:00",
+  "scope": "Authorized to complete this new local M5 Pro experiment and submit the reviewed experiment report as a separate results PR. Candidate: independently implemented .NET + Metal, official FP8 checkpoint, FP32 compute/state, 4096-token initial window. Planned prefill >=500 tokens/s and decode >=50 tokens/s. No fixed budget; stop on user request. Baseline is a disclosed affine8/BF16 configuration and is not precision-matched. Keep evaluations unchanged, preserve stage gates, and do not merge PRs or modify OS limits/power. Raw weights, binaries, private prompts/transcripts and machine addresses remain local-only.",
   "hardware": {
     "platform": "Apple M5 Pro",
     "gpu_cores": 20,
     "memory_gib": 48,
     "os_version": "macOS 26.6.2 (25G83); Darwin 25.6.0; Metal 4",
-    "toolchain": "Observed: .NET SDK 10.0.100 and 11.0.100-rc.1.26425.128 (osx-arm64); Apple clang 21.0.0 (clang-2100.3.34.2); Metal 4; Node.js v26.7.0 for planning checks. No project global.json exists yet. xcrun could not locate the offline Metal compiler; runtime Metal shader compilation is to be checked before freeze.",
+    "toolchain": ".NET SDK 10.0.100 for candidate; Apple clang 21.0.0 (clang-2100.3.34.2); runtime Metal shader compilation verified on Apple M5 Pro; Metal 4; macOS 26.6.2 (25G83). Baseline: Python 3.12.13, MLX 0.32.4, MLX-LM pinned separately. No offline Metal compiler or system changes required.",
     "power": "Observed AC power, battery charged; configured powermode=2 for AC and battery. No power settings modified; re-observe before each run.",
-    "gpu_memory_limit": null,
-    "exclusive_gpu": null
+    "gpu_memory_limit": "OS default; observed recommendedMaxWorkingSetSize=44023414784 bytes (41 GiB), maxBufferLength=30150672384 bytes. No global memory-limit override or forced wiring. Re-observe allocation and pressure during actual runs.",
+    "exclusive_gpu": false
   },
   "target_model": {
     "repository": "Qwen/Qwen3.6-35B-A3B-FP8",
@@ -191,25 +224,37 @@
     ],
     "tokenizer_hash": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
     "chat_template_hash": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
-    "weights": "Official FP8 E4M3 checkpoint with 128x128 block scaling for quantized weights and BF16 tensors where excluded from quantization. Preserve this checkpoint representation; do not substitute affine INT8 or INT4. Activation, KV, and recurrent-state precision remain unresolved.",
-    "activation_precision": null,
-    "kv_precision": null,
-    "recurrent_state_precision": null,
-    "speculative_decoding": null,
-    "speculative_draft": null
+    "weights": "Official FP8 E4M3 checkpoint, 128x128 block scaling, with excluded BF16 tensors. Weight-only FP8 storage with FP32 math; no affine INT8/INT4 substitution. Text inference only, greedy, thinking disabled, no vision/MTP path, 4096-token initial served window. MTP and vision tensors are not executed.",
+    "activation_precision": "FP32 activations and accumulation; FP8 E4M3 checkpoint weights remain packed and are decoded in Metal kernels. Excluded BF16 tensors retain their source values and are promoted to FP32 for computation.",
+    "kv_precision": "FP32; initial 4096-token served context; unscaled text RoPE; request-isolated KV reset.",
+    "recurrent_state_precision": "FP32 recurrent state and depthwise-convolution state, consistent with the official mamba_ssm_dtype=float32 configuration.",
+    "speculative_decoding": false,
+    "speculative_draft": {
+      "not_applicable": true,
+      "reason": "Speculative decoding is disabled; no draft model is used."
+    }
   },
   "builder": {
-    "model": null,
-    "provider": null,
-    "revision_or_exposed_identifier": null,
-    "initial_inference_location": null,
-    "sampling_settings": null,
-    "network_and_source_access": null
+    "model": "GPT-6-family Codex assistant in this conversation; the exact deployed model name is not exposed to the assistant.",
+    "provider": "OpenAI",
+    "revision_or_exposed_identifier": {
+      "unavailable": true,
+      "reason": "The provider does not expose an immutable runtime model revision or exact deployment identifier to this assistant."
+    },
+    "initial_inference_location": "OpenAI-hosted Codex inference; exact deployment location is unavailable. Routing remains with the Codex host; no self-hosting claim.",
+    "sampling_settings": {
+      "temperature": "Provider-controlled; not exposed to the assistant.",
+      "seed": "Not exposed to the assistant."
+    },
+    "network_and_source_access": "Local terminal/filesystem, official Hugging Face model files, GitHub source and Git tools, package registries for declared baseline/development tools. Baseline source inspection permitted; existing inference backends prohibited in the candidate."
   },
   "development_harness": {
-    "name": null,
-    "version": null,
-    "revision_or_package_hash": null
+    "name": "Codex desktop conversation and its local execution tools",
+    "version": "Desktop build version not exposed; local codex-cli 0.157.0 observed.",
+    "revision_or_package_hash": {
+      "unavailable": true,
+      "reason": "The running desktop harness does not expose an immutable package hash to this assistant; the CLI observation is not treated as the desktop identity."
+    }
   },
   "evaluation": {
     "definition": {
@@ -221,17 +266,31 @@
     "formal_repetitions": 3
   },
   "implementation": {
-    "starting_scaffold": null,
-    "language_and_backend": "User-selected .NET (C#) host with independently implemented Metal compute kernels for Apple Silicon. Implement weight loading, model execution, attention/recurrent state, and generation in the candidate; any native interop bridge must be limited to invoking Metal/platform APIs and must not wrap an existing LLM inference engine. SDK and binding package pins are resolved before freeze.",
-    "allowed_libraries": null,
-    "baseline_source_inspection_allowed": null,
+    "starting_scaffold": "Empty candidate Git repository commit 5fe496f89f7bd68eeb6ffc2f2f2efef375771c5e in the separately identified llm-bootstrap-qwen3.8-35b-engine workspace. No candidate code exists before contract freeze; no baseline implementation code may be copied.",
+    "language_and_backend": ".NET 10 / C# with original Metal compute kernels and a minimal original Objective-C/C ABI bridge calling platform APIs. Runtime Metal compilation verified. Host CPU performs tokenization, API/control, and sampling only; no CPU model-computation fallback.",
+    "allowed_libraries": [
+      ".NET SDK 10.0.100 and .NET 10 runtime / Microsoft.AspNetCore.App shared framework",
+      "System.Text.Json and System.Text.RegularExpressions from the .NET runtime",
+      "Apple Metal and Foundation frameworks through an original native bridge",
+      "macOS libc for file mapping and native allocation"
+    ],
+    "baseline_source_inspection_allowed": true,
     "existing_engine_backend_allowed": false
   },
   "baselines": {
-    "selection_date": null,
-    "selection_method": null,
-    "engines_and_revisions": [],
-    "comparison_track": "matched-configuration"
+    "selection_date": "2026-10-29",
+    "selection_method": "Primary-source selection: MLX-LM official repository at 6b572ab1b531dd8fd2d13f6f36a89c2eccda18ea supports Qwen3.5/3.6 MoE on Apple Metal. A source inspection found no Qwen support for this official E4M3 checkpoint layout, so the independently pinned baseline uses existing verified mlx-community/Qwen3.6-35B-A3B-8bit revision e06a74e6236a60c8367e1a3214e83d8b61b637b0, affine8/group64, with MLX 0.32.4. Generic protocol adapter 6992293876fe2e666923f7b19d17747611844a34 supplies Responses/Anthropic envelopes and input validation without changing model-generated content. The baseline uses BF16 activation/KV defaults; candidate uses FP32. Differences are disclosed and no matched-precision speedup or SOTA coverage is claimed. Other CUDA-only or conversion-dependent engines were not selected for this local Apple-device preflight.",
+    "engines_and_revisions": [
+      {
+        "name": "mlx-lm",
+        "revision": "6b572ab1b531dd8fd2d13f6f36a89c2eccda18ea"
+      },
+      {
+        "name": "mlx-lm-protocol-adapter",
+        "revision": "6992293876fe2e666923f7b19d17747611844a34"
+      }
+    ],
+    "comparison_track": "best-permitted-configuration"
   },
   "goal": {
     "primary_metric": "Use the pinned engine-throughput headline workloads prefill.in2k.out1 and decode.in128.out256. Prefill throughput is processed uncached prompt tokens divided by client dispatch-to-first-output-chunk time, including queueing, transfer, and the first sampled token. Decode is the ratio of summed N-1 output-token intervals to summed first-to-last output-chunk durations, subject to the repository driver chunk-density gate. The 500/50 tokens/s values are planned acceptance targets, not measurements.",
@@ -250,7 +309,16 @@
       }
     ],
     "quality_gate": "Load the selected official FP8 model and generate through the independently implemented .NET + Metal inference path. Pass the pinned engine-api-conformance gate before throughput measurement. Apply the repository-owned workload length, usage, cache, and streaming gates and record every failed pass. Numerical equivalence to a reference implementation is not required by the updated protocol. HumanEval application scoring is a separately available evaluation, not selected in this initial throughput experiment.",
-    "resource_limits": null,
+    "resource_limits": {
+      "max_memory_footprint_gib": {
+        "not_applicable": true,
+        "reason": "The user set no additional numeric footprint cap beyond the selected 48 GiB machine and unchanged OS/Metal memory limits. Measure and report footprint/pressure; do not silently raise system limits."
+      },
+      "max_swap_out_delta_gib": {
+        "not_applicable": true,
+        "reason": "No numeric swap-out acceptance cap was set. Measure and report the whole-machine delta; do not attribute it to the engine without evidence or claim swap-free execution."
+      }
+    },
     "self_hosting_in_scope": false
   },
   "budget": {
