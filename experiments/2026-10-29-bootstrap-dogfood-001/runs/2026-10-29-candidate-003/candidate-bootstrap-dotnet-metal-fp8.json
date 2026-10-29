@@ -1,0 +1,167 @@
+{
+  "evaluation": {
+    "evaluation_id": "engine-throughput",
+    "revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
+    "sha256": "b5857229e97b2d2451e0d89f9c43b4e95269cb33bc3fed6221c21de54308c0a5"
+  },
+  "role": "candidate",
+  "engine_name": "bootstrap-dotnet-metal-fp8-simd-router",
+  "environment": {
+    "hardware_model": "Apple M5 Pro; 20 GPU cores; 48 GiB unified memory",
+    "os_version": "macOS-26.6.2-arm64-arm-64bit",
+    "toolchain": ".NET SDK 10.0.100; .NET 10; clang 21; original FP32 Metal kernels and SIMD top-eight router",
+    "power_mode": "AC observed before run; configured powermode=2; no settings changed",
+    "thermal_observations": "Quantitative thermal sensors not instrumented; no thermal stability claim",
+    "exclusive_gpu": false,
+    "deviations_from_contract": []
+  },
+  "runtime_revision": "1d2d24572c78e702ad92ed878fc5f2d6dd1128d0",
+  "artifacts": [
+    {
+      "name": "Bootstrap.Engine.dll",
+      "sha256": "490edec2af793ade9540d4694a2b872e628745699032abe46ef61dc8dc1666d1"
+    },
+    {
+      "name": "libbootstrap_metal.dylib",
+      "sha256": "87ed6a0113616768bf9df3c92a9c70405cc900e21e98240b0395463fa2077840"
+    },
+    {
+      "name": "kernels.metal",
+      "sha256": "86663fe422c94e127baa66347a6550eb3880c3e28e3e3a24e0c9beff53971490"
+    }
+  ],
+  "commands": [
+    "/tmp/llm-bootstrap-updated-WHrKC9/evaluations/engine-throughput/scripts/throughput.py --endpoint http://127.0.0.1:17863 --model qwen3.6-35b-a3b --engine-name bootstrap-dotnet-metal-fp8-simd-router --evaluation-revision 9b71eb126c862a8c185272e5b68a26a55e953cb9 --runtime-revision 1d2d24572c78e702ad92ed878fc5f2d6dd1128d0 --artifact Bootstrap.Engine.dll=490edec2af793ade9540d4694a2b872e628745699032abe46ef61dc8dc1666d1 --artifact libbootstrap_metal.dylib=87ed6a0113616768bf9df3c92a9c70405cc900e21e98240b0395463fa2077840 --artifact kernels.metal=86663fe422c94e127baa66347a6550eb3880c3e28e3e3a24e0c9beff53971490 --role candidate --workloads prefill.in2k.out1,decode.in128.out256 --warmup 1 --repetitions 3 --request-field ignore_eos=true --engine-command dotnet Bootstrap.Engine.dll serve --model-dir MODEL_DIR --port PORT; original official FP8/FP32 .NET+Metal; profiler disabled --hardware-model Apple M5 Pro; 20 GPU cores; 48 GiB unified memory --toolchain .NET SDK 10.0.100; .NET 10; clang 21; original FP32 Metal kernels and SIMD top-eight router --power-mode AC observed before run; configured powermode=2; no settings changed --thermal-observations Quantitative thermal sensors not instrumented; no thermal stability claim --memory-pid 88663 --output experiments/2026-10-29-bootstrap-dogfood-001/runs/2026-10-29-candidate-003/candidate-bootstrap-dotnet-metal-fp8.json",
+    "dotnet Bootstrap.Engine.dll serve --model-dir MODEL_DIR --port PORT; original official FP8/FP32 .NET+Metal; profiler disabled"
+  ],
+  "settings": {
+    "api": "openai-chat-completions-stream",
+    "temperature": 0,
+    "seed": 0,
+    "workloads": "prefill.in2k.out1,decode.in128.out256",
+    "warmup_passes": 1,
+    "formal_passes": 3,
+    "endpoint_scheme": "http",
+    "endpoint_host_class": "loopback",
+    "input_tokens_counted_by": "the engine-reported usage.prompt_tokens, which includes the chat template",
+    "prefill_seconds_definition": "client time from dispatch to the first output chunk; it includes queueing, transfer, and the first sampled token",
+    "decode_definition": "usage.completion_tokens minus 1 divided by the time from the first to the last output chunk; it applies only while chunks are at least 0.9 per token",
+    "aggregate_output_definition": "output tokens of all requests in a closed-loop batch divided by the time from the first dispatch to the last completion, including ramp-up and ramp-down",
+    "cache_policy_applied": "a unique nonce starts every session; reported cached tokens must be zero except on warm agent turns, which must reuse at least 0.9 of the shared prefix",
+    "cached_tokens_reported": true,
+    "filler_words.decode.in128.out256": 76,
+    "filler_words.prefill.in2k.out1": 2007,
+    "decode_chunk_token_ratio.decode.in128.out256": 1.0,
+    "request_field.ignore_eos": true,
+    "peak_memory_definition": "resident set size of PID 88663 sampled every 0.5 seconds during the formal passes; it may not include GPU memory"
+  },
+  "repetitions": [
+    {
+      "phase": "warm-up",
+      "outcome": "succeeded"
+    },
+    {
+      "phase": "formal",
+      "outcome": "succeeded"
+    },
+    {
+      "phase": "formal",
+      "outcome": "succeeded"
+    },
+    {
+      "phase": "formal",
+      "outcome": "succeeded"
+    }
+  ],
+  "metrics": {
+    "formal_repetitions": 3,
+    "preliminary": false,
+    "prefill": {
+      "basis": "processed-input-tokens",
+      "total_tokens": 6146,
+      "total_seconds": 19.293071,
+      "tokens_per_second": 318.5599638336478
+    },
+    "decode": {
+      "basis": "n-minus-1-intervals",
+      "total_tokens": 765,
+      "total_seconds": 14.283488,
+      "tokens_per_second": 53.55834653272366
+    },
+    "client_ttft_median_seconds": 6.428973458999998,
+    "application_duration_seconds": 35.197,
+    "requests_reconciled": true,
+    "per_request_evidence": {
+      "description": "Per-request timings, token counts, and gate outcomes; it holds no prompts or model output",
+      "access": "local-only",
+      "sha256": "e789d9f94accde687dd34718d979cedb57050003d8944538b7142d77c00c15fc",
+      "access_limitation": "Kept next to the result document and not committed to the repository."
+    }
+  },
+  "workloads": [
+    {
+      "workload_id": "prefill.in2k.out1",
+      "kind": "prefill",
+      "input_tokens": 2048,
+      "output_tokens": 1,
+      "concurrency": 1,
+      "requests": 3,
+      "succeeded_requests": 3,
+      "prefill": {
+        "basis": "processed-input-tokens",
+        "total_tokens": 6146,
+        "total_seconds": 19.293071,
+        "tokens_per_second": 318.5599638336478
+      },
+      "decode": "Not obtained",
+      "ttft_median_seconds": 6.428973458999998,
+      "variability": {
+        "metric": "prefill tokens per second",
+        "values": [
+          318.7134,
+          317.7716,
+          319.1992
+        ],
+        "sample_stddev": 0.7258
+      }
+    },
+    {
+      "workload_id": "decode.in128.out256",
+      "kind": "decode",
+      "input_tokens": 128,
+      "output_tokens": 256,
+      "concurrency": 1,
+      "requests": 3,
+      "succeeded_requests": 3,
+      "prefill": "Not obtained",
+      "decode": {
+        "basis": "n-minus-1-intervals",
+        "total_tokens": 765,
+        "total_seconds": 14.283488,
+        "tokens_per_second": 53.55834653272366
+      },
+      "ttft_median_seconds": 0.5393986659999968,
+      "variability": {
+        "metric": "decode tokens per second",
+        "values": [
+          53.6651,
+          53.5766,
+          53.4339
+        ],
+        "sample_stddev": 0.1167
+      }
+    }
+  ],
+  "resources": {
+    "peak_memory_gib": 1.128,
+    "swap_out_delta_bytes": 0
+  },
+  "quality": {
+    "application": {
+      "passed": 6,
+      "total": 6,
+      "negative_control_verified": true,
+      "restricted_environment": true
+    }
+  }
+}
