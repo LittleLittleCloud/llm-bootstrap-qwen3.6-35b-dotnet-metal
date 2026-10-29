@@ -116,7 +116,7 @@ kernel void argmax(device const float*x [[buffer(0)]],device int*out [[buffer(1)
 struct ExpertTile { uint expert,first,count,pad; };
 kernel void batch_embedding(device const ushort*w [[buffer(0)]],device const int*tokens [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.m*2048)y[i]=bf(w[uint(tokens[i/2048])*2048+i%2048]);}
 
-kernel void matrix_product(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
+kernel void matrix_product_small(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
     threadgroup float xt[16*33],wt[32*33],result[16*33];
     uint firstRow=group.y*16,firstColumn=group.x*32;
     for(uint i=tid;i<16*33;i+=128)result[i]=0;threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -132,6 +132,29 @@ kernel void matrix_product(device const float*x [[buffer(0)]],device const uchar
     for(uint i=tid;i<16*32;i+=128){uint row=i/32,col=i%32;if(firstRow+row<p.m&&firstColumn+col<p.n)y[(firstRow+row)*p.n+firstColumn+col]=result[row*33+col];}
 }
 
+// Wider FP32 tiles reuse each decoded weight across 32 prompt tokens. Staging
+// buffers are reused for the output so the threadgroup footprint stays <32 KiB.
+kernel void matrix_product(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
+    threadgroup float xt[32*65],wt[64*65];
+    uint firstRow=group.y*32,firstColumn=group.x*64,rr=(sid/4)*16,cc=(sid%4)*16;
+    for(uint i=tid;i<32*65;i+=256)xt[i]=0;threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_float8x8 c00,c01,c10,c11;
+    simdgroup_load(c00,xt+rr*65+cc,65);simdgroup_load(c01,xt+rr*65+cc+8,65);
+    simdgroup_load(c10,xt+(rr+8)*65+cc,65);simdgroup_load(c11,xt+(rr+8)*65+cc+8,65);threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint block=0;block<p.k;block+=64){
+        for(uint i=tid;i<32*16;i+=256){uint row=i/16,col=(i%16)*4;float4 value=firstRow+row<p.m?*((device const float4*)(x+(firstRow+row)*p.k+block+col)):float4(0);for(uint d=0;d<4;++d)xt[row*65+col+d]=value[d];}
+        for(uint i=tid;i<64*16;i+=256){uint row=i/16,col=(i%16)*4;float4 value=firstColumn+row<p.n?weight4(w,s,firstColumn+row,block+col,p.k,p.kind):float4(0);for(uint d=0;d<4;++d)wt[(col+d)*65+row]=value[d];}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for(uint kk=0;kk<64;kk+=8){
+            simdgroup_float8x8 a0,a1,b0,b1;simdgroup_load(a0,xt+rr*65+kk,65);simdgroup_load(a1,xt+(rr+8)*65+kk,65);simdgroup_load(b0,wt+kk*65+cc,65);simdgroup_load(b1,wt+kk*65+cc+8,65);
+            simdgroup_multiply_accumulate(c00,a0,b0,c00);simdgroup_multiply_accumulate(c01,a0,b1,c01);simdgroup_multiply_accumulate(c10,a1,b0,c10);simdgroup_multiply_accumulate(c11,a1,b1,c11);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    simdgroup_store(c00,xt+rr*65+cc,65);simdgroup_store(c01,xt+rr*65+cc+8,65);simdgroup_store(c10,xt+(rr+8)*65+cc,65);simdgroup_store(c11,xt+(rr+8)*65+cc+8,65);threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint i=tid;i<32*64;i+=256){uint row=i/64,col=i%64;if(firstRow+row<p.m&&firstColumn+col<p.n)y[(firstRow+row)*p.n+firstColumn+col]=xt[row*65+col];}
+}
+
 kernel void batch_router(device const float*x [[buffer(0)]],device int*ids [[buffer(1)]],device float*prob [[buffer(2)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
     uint token=g/32;if(token>=p.k)return;route_simd(x+token*256,ids+token*8,prob+token*8,lane);
 }
@@ -143,22 +166,23 @@ kernel void expert_group(device const int*ids [[buffer(0)]],device const uint*of
     if(e>=256)return;uint at=offsets[e];for(uint i=0;i<p.m*8;++i)if(ids[i]==int(e)){tokens[at]=i/8;inverse[i]=at++;}
 }
 kernel void expert_matrix(device const float*x [[buffer(0)]],device const uchar*raw [[buffer(1)]],device const Expert*experts [[buffer(2)]],device const ExpertTile*tiles [[buffer(3)]],device const uint*tileCount [[buffer(4)]],device const uint*tokens [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
-    if(group.y>=tileCount[0])return;ExpertTile tile=tiles[group.y];Expert descriptor=experts[tile.expert];uint firstColumn=group.x*32;
+    if(group.y>=tileCount[0])return;ExpertTile tile=tiles[group.y];Expert descriptor=experts[tile.expert];uint firstColumn=group.x*64;
     ulong woff=p.kind==0?descriptor.gate:p.kind==1?descriptor.up:descriptor.down,soff=p.kind==0?descriptor.gate_scale:p.kind==1?descriptor.up_scale:descriptor.down_scale;
     device const uchar*w=raw+woff;device const ushort*s=(device const ushort*)(raw+soff);
-    threadgroup float xt[16*33],wt[32*33],result[16*33];
-    for(uint i=tid;i<16*33;i+=128)result[i]=0;threadgroup_barrier(mem_flags::mem_threadgroup);
-    simdgroup_float8x8 c0,c1;simdgroup_load(c0,result+sid*8,33);simdgroup_load(c1,result+8*33+sid*8,33);
-    for(uint block=0;block<p.k;block+=32){
-        for(uint i=tid;i<16*32;i+=128){uint row=i/32,col=i%32;uint inputRow=row<tile.count?(p.kind==2?tile.first+row:tokens[tile.first+row]):0;xt[row*33+col]=row<tile.count?x[inputRow*p.k+block+col]:0;}
-        for(uint i=tid;i<32*32;i+=128){uint row=i/32,col=i%32;wt[col*33+row]=firstColumn+row<p.n?weight(w,s,firstColumn+row,block+col,p.k,0):0;}
+    threadgroup float xt[16*65],wt[64*65];
+    for(uint i=tid;i<16*65;i+=256)xt[i]=0;threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_float8x8 c0,c1;simdgroup_load(c0,xt+sid*8,65);simdgroup_load(c1,xt+8*65+sid*8,65);threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint block=0;block<p.k;block+=64){
+        for(uint i=tid;i<16*16;i+=256){uint row=i/16,col=(i%16)*4;uint inputRow=row<tile.count?(p.kind==2?tile.first+row:tokens[tile.first+row]):0;float4 value=row<tile.count?*((device const float4*)(x+inputRow*p.k+block+col)):float4(0);for(uint d=0;d<4;++d)xt[row*65+col+d]=value[d];}
+        for(uint i=tid;i<64*16;i+=256){uint row=i/16,col=(i%16)*4;float4 value=firstColumn+row<p.n?weight4(w,s,firstColumn+row,block+col,p.k,0):float4(0);for(uint d=0;d<4;++d)wt[(col+d)*65+row]=value[d];}
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for(uint kk=0;kk<32;kk+=8){simdgroup_float8x8 a0,a1,b;simdgroup_load(a0,xt+kk,33);simdgroup_load(a1,xt+8*33+kk,33);simdgroup_load(b,wt+kk*33+sid*8,33);simdgroup_multiply_accumulate(c0,a0,b,c0);simdgroup_multiply_accumulate(c1,a1,b,c1);}
+        for(uint kk=0;kk<64;kk+=8){simdgroup_float8x8 a0,a1,b;simdgroup_load(a0,xt+kk,65);simdgroup_load(a1,xt+8*65+kk,65);simdgroup_load(b,wt+kk*65+sid*8,65);simdgroup_multiply_accumulate(c0,a0,b,c0);simdgroup_multiply_accumulate(c1,a1,b,c1);}
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    simdgroup_store(c0,result+sid*8,33);simdgroup_store(c1,result+8*33+sid*8,33);threadgroup_barrier(mem_flags::mem_threadgroup);
-    for(uint i=tid;i<16*32;i+=128){uint row=i/32,col=i%32;if(row<tile.count&&firstColumn+col<p.n)y[(tile.first+row)*p.n+firstColumn+col]=result[row*33+col];}
+    simdgroup_store(c0,xt+sid*8,65);simdgroup_store(c1,xt+8*65+sid*8,65);threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint i=tid;i<16*64;i+=256){uint row=i/64,col=i%64;if(row<tile.count&&firstColumn+col<p.n)y[(tile.first+row)*p.n+firstColumn+col]=xt[row*65+col];}
 }
+
 kernel void batch_mix(device const float*residual [[buffer(0)]],device const float*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*2048)return;uint token=i/2048,d=i%2048;float value=residual[i]+shared[i]*sigmoid(gate[token]);for(uint e=0;e<8;++e)value+=prob[token*8+e]*expert[inverse[token*8+e]*2048+d];y[i]=value;
 }

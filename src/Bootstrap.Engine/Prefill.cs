@@ -23,7 +23,8 @@ internal sealed partial class QwenEngine
     {
         var tensor = weights[name + ".weight"];
         var scales = tensor.Kind == 0 ? weights[name + ".weight_scale_inv"].Binding : (Binding)dummy;
-        gpu.Dispatch2D("matrix_product", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, checked((uint)((tensor.Shape[0] + 31) / 32 * 128)), checked((uint)((count + 15) / 16)), 128, input, tensor.Binding, scales, output);
+        bool small = tensor.Shape[0] <= 32;
+        gpu.Dispatch2D(small ? "matrix_product_small" : "matrix_product", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, checked((uint)((tensor.Shape[0] + (small ? 31 : 63)) / (small ? 32 : 64) * (small ? 128 : 256))), checked((uint)((count + (small ? 15 : 31)) / (small ? 16 : 32))), small ? 128u : 256u, input, tensor.Binding, scales, output);
     }
     int PrefillBlock(ReadOnlySpan<int> tokens, int position, bool output, bool ignoreEos)
     {
@@ -67,7 +68,7 @@ internal sealed partial class QwenEngine
             gpu.Dispatch("expert_group", new() { M = (uint)count }, 256, 128, b.Ids, b.Offsets, b.SortedTokens, b.Inverse);
             var raw = weights.Shard("layers-" + layer + ".safetensors");
             uint tileLimit = (uint)Math.Min(count * 8, (count * 8 + 15) / 16 + 256);
-            void ExpertProjection(uint choice, uint rows, uint columns, GpuBuffer input, GpuBuffer result) => gpu.Dispatch2D("expert_matrix", new() { N = rows, K = columns, Kind = choice }, ((rows + 31) / 32) * 128, tileLimit, 128, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
+            void ExpertProjection(uint choice, uint rows, uint columns, GpuBuffer input, GpuBuffer result) => gpu.Dispatch2D("expert_matrix", new() { N = rows, K = columns, Kind = choice }, ((rows + 63) / 64) * 256, tileLimit, 256, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
             ExpertProjection(0, 512, Hidden, b.Norm, b.ExpertGate); ExpertProjection(1, 512, Hidden, b.Norm, b.ExpertUp);
             gpu.Dispatch("silu_product", new() { N = checked((uint)count * 8 * 512) }, checked((uint)count * 8 * 512), 128, b.ExpertGate, b.ExpertUp, b.ExpertActivation);
             ExpertProjection(2, Hidden, 512, b.ExpertActivation, b.ExpertOutput);

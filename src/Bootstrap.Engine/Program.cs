@@ -104,7 +104,7 @@ if (command == "kernel-self-test")
     using var matrixX = device.Allocate(matrixRows * cols * 4); using var matrixW = device.Allocate(matrixColumns * cols); using var matrixY = device.Allocate(matrixRows * matrixColumns * 4);
     for (int i = 0; i < matrixRows * cols; i++) matrixX.Values<float>(matrixRows * cols)[i] = ((i * 7 + i / cols * 11) % 31 - 15) / 32f;
     for (int i = 0; i < matrixColumns * cols; i++) { byte value = (byte)(i * 13 + i / cols * 29); if ((value & 127) == 127) value--; matrixW.Values<byte>(matrixColumns * cols)[i] = value; }
-    device.Begin(); device.Dispatch2D("matrix_product", new() { N = matrixColumns, M = matrixRows, K = cols, Kind = 0 }, ((matrixColumns + 31) / 32) * 128, (matrixRows + 15) / 16, 128, matrixX, matrixW, scales, matrixY); device.End();
+    device.Begin(); device.Dispatch2D("matrix_product", new() { N = matrixColumns, M = matrixRows, K = cols, Kind = 0 }, ((matrixColumns + 63) / 64) * 256, (matrixRows + 31) / 32, 256, matrixX, matrixW, scales, matrixY); device.End();
     for (int r = 0; r < matrixRows; r++) for (int c = 0; c < matrixColumns; c++)
     {
         double expected = 0;
