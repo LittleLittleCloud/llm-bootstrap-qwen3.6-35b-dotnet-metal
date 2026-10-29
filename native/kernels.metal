@@ -44,10 +44,22 @@ kernel void rmsnorm(device const float*x [[buffer(0)]],device const ushort*w [[b
 }
 kernel void add(device const float*x [[buffer(0)]],device const float*z [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=x[i]+z[i];}
 kernel void silu_product(device const float*x [[buffer(0)]],device const float*z [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=silu(x[i])*z[i];}
-kernel void router(device const float*x [[buffer(0)]],device int*ids [[buffer(1)]],device float*prob [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
-    if(i)return;float peak=-INFINITY,den=0;
-    for(uint k=0;k<p.m;++k){float best=-INFINITY;int index=-1;for(uint j=0;j<p.n;++j){bool used=false;for(uint t=0;t<k;++t)used|=ids[t]==int(j);if(!used&&(x[j]>best||(x[j]==best&&(index<0||j<uint(index))))){best=x[j];index=int(j);}}ids[k]=index;prob[k]=best;if(k==0)peak=best;}
-    for(uint k=0;k<p.m;++k){prob[k]=exp(prob[k]-peak);den+=prob[k];}for(uint k=0;k<p.m;++k)prob[k]/=den;
+inline void route_simd(device const float*x,device int*ids,device float*prob,uint lane) {
+    float values[8],chosen[8];
+    for(uint j=0;j<8;++j)values[j]=x[j*32+lane];
+    float peak=0,denominator=0;
+    for(uint choice=0;choice<8;++choice){
+        float local=-INFINITY;uint index=0xffffffff;
+        for(uint j=0;j<8;++j){uint at=j*32+lane;float value=values[j];if(value>local||(value==local&&at<index)){local=value;index=at;}}
+        float best=simd_max(local);uint selected=simd_min(local==best?index:0xffffffff);
+        for(uint j=0;j<8;++j)if(j*32+lane==selected)values[j]=-INFINITY;
+        if(choice==0)peak=best;chosen[choice]=exp(best-peak);denominator+=chosen[choice];
+        if(lane==0)ids[choice]=int(selected);
+    }
+    if(lane==0)for(uint choice=0;choice<8;++choice)prob[choice]=chosen[choice]/denominator;
+}
+kernel void router(device const float*x [[buffer(0)]],device int*ids [[buffer(1)]],device float*prob [[buffer(2)]],constant P&p [[buffer(15)]],uint lane [[thread_index_in_simdgroup]]) {
+    route_simd(x,ids,prob,lane);
 }
 kernel void expert_gate_up(device const float*x [[buffer(0)]],device const uchar*raw [[buffer(1)]],device const Expert*experts [[buffer(2)]],device const int*ids [[buffer(3)]],device float*y [[buffer(4)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
     uint row=g/32,e=row/p.n,r=row%p.n;if(e>=p.m)return;Expert d=experts[ids[e]];float4 ga=0,ua=0;
@@ -120,10 +132,8 @@ kernel void matrix_product(device const float*x [[buffer(0)]],device const uchar
     for(uint i=tid;i<16*32;i+=128){uint row=i/32,col=i%32;if(firstRow+row<p.m&&firstColumn+col<p.n)y[(firstRow+row)*p.n+firstColumn+col]=result[row*33+col];}
 }
 
-kernel void batch_router(device const float*x [[buffer(0)]],device int*ids [[buffer(1)]],device float*prob [[buffer(2)]],constant P&p [[buffer(15)]],uint token [[thread_position_in_grid]]) {
-    if(token>=p.k)return;float peak=-INFINITY,den=0;
-    for(uint choice=0;choice<8;++choice){float best=-INFINITY;int index=-1;for(uint e=0;e<256;++e){bool used=false;for(uint t=0;t<choice;++t)used|=ids[token*8+t]==int(e);float score=x[token*256+e];if(!used&&(score>best||(score==best&&(index<0||e<uint(index))))){best=score;index=int(e);}}ids[token*8+choice]=index;prob[token*8+choice]=best;if(choice==0)peak=best;}
-    for(uint choice=0;choice<8;++choice){prob[token*8+choice]=exp(prob[token*8+choice]-peak);den+=prob[token*8+choice];}for(uint choice=0;choice<8;++choice)prob[token*8+choice]/=den;
+kernel void batch_router(device const float*x [[buffer(0)]],device int*ids [[buffer(1)]],device float*prob [[buffer(2)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+    uint token=g/32;if(token>=p.k)return;route_simd(x+token*256,ids+token*8,prob+token*8,lane);
 }
 kernel void expert_counts(device const int*ids [[buffer(0)]],device uint*counts [[buffer(1)]],constant P&p [[buffer(15)]],uint e [[thread_position_in_grid]]) {if(e<256){uint count=0;for(uint i=0;i<p.m*8;++i)count+=ids[i]==int(e);counts[e]=count;}}
 kernel void expert_tiles(device const uint*counts [[buffer(0)]],device uint*offsets [[buffer(1)]],device ExpertTile*tiles [[buffer(2)]],device uint*tileCount [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {

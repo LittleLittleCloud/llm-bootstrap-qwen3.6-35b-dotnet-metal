@@ -113,6 +113,22 @@ if (command == "kernel-self-test")
         if (Math.Abs(actual - expected) > .002) throw new Exception($"Batched FP8 projection mismatch row={r} col={c}: {actual} != {expected}");
         checks++;
     }
+    const int routeTokens = 5;
+    using var routeX = device.Allocate(routeTokens * 256 * 4); using var routeIds = device.Allocate(routeTokens * 8 * 4); using var routeProb = device.Allocate(routeTokens * 8 * 4);
+    for (int t = 0; t < routeTokens; t++) for (int i = 0; i < 256; i++) routeX.Values<float>(routeTokens * 256)[t * 256 + i] = t == 0 ? 0 : ((i * 31 + t * 29) % (t * 17 + 11) - 15) / 8f;
+    device.Begin(); device.Dispatch("batch_router", new() { K = routeTokens }, routeTokens * 32, 128, routeX, routeIds, routeProb); device.End();
+    for (int t = 0; t < routeTokens; t++)
+    {
+        float[] values = routeX.Values<float>(routeTokens * 256).Slice(t * 256, 256).ToArray();
+        int[] expected = Enumerable.Range(0, 256).OrderByDescending(i => values[i]).ThenBy(i => i).Take(8).ToArray();
+        double denominator = expected.Sum(i => Math.Exp(values[i] - values[expected[0]]));
+        for (int i = 0; i < 8; i++)
+        {
+            if (routeIds.Values<int>(routeTokens * 8)[t * 8 + i] != expected[i]) throw new Exception("Parallel router tie/selection mismatch");
+            if (Math.Abs(routeProb.Values<float>(routeTokens * 8)[t * 8 + i] - Math.Exp(values[expected[i]] - values[expected[0]]) / denominator) > 1e-6) throw new Exception("Parallel router probability mismatch");
+            checks += 2;
+        }
+    }
     Console.WriteLine(JsonSerializer.Serialize(new { passed = checks, allocated_bytes = device.AllocatedBytes, native_model_backend = "original Metal kernels" }));
     return;
 }

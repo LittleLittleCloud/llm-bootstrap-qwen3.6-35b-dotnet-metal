@@ -99,7 +99,7 @@ internal sealed partial class QwenEngine : IDisposable
             }
             Add(x, projection); Normalize(x, prefix + ".post_attention_layernorm", norm);
             Project(prefix + ".mlp.gate", norm, router);
-            gpu.Dispatch("router", new() { N = 256, M = 8 }, 1, 1, router, ids, rates);
+            gpu.Dispatch("router", new() { N = 256, M = 8 }, 32, 32, router, ids, rates);
             Project(prefix + ".mlp.shared_expert.gate_proj", norm, sharedGate); Project(prefix + ".mlp.shared_expert.up_proj", norm, sharedUp);
             gpu.Dispatch("silu_product", new() { N = 512 }, 512, 128, sharedGate, sharedUp, sharedActivation);
             Project(prefix + ".mlp.shared_expert.down_proj", sharedActivation, sharedOutput); Project(prefix + ".mlp.shared_expert_gate", norm, sharedWeight);

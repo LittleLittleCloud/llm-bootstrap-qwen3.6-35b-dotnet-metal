@@ -61,7 +61,7 @@ internal sealed partial class QwenEngine
             gpu.Dispatch("add", new() { N = checked((uint)count * Hidden) }, checked((uint)count * Hidden), 128, b.Hidden, b.Projection, b.Hidden);
             Normalize(b.Hidden, prefix + ".post_attention_layernorm", b.Norm, Hidden, (uint)count);
             BatchProject(prefix + ".mlp.gate", b.Norm, b.Router, count);
-            gpu.Dispatch("batch_router", new() { K = (uint)count }, (uint)count, 128, b.Router, b.Ids, b.Rates);
+            gpu.Dispatch("batch_router", new() { K = (uint)count }, (uint)count * 32, 128, b.Router, b.Ids, b.Rates);
             gpu.Dispatch("expert_counts", new() { M = (uint)count }, 256, 128, b.Ids, b.Counts);
             gpu.Dispatch("expert_tiles", new() { M = (uint)count }, 1, 1, b.Counts, b.Offsets, b.Tiles, b.TileCount);
             gpu.Dispatch("expert_group", new() { M = (uint)count }, 256, 128, b.Ids, b.Offsets, b.SortedTokens, b.Inverse);
