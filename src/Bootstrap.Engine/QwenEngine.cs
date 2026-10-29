@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 
 namespace Bootstrap.Engine;
 
-internal sealed class QwenEngine : IDisposable
+internal sealed partial class QwenEngine : IDisposable
 {
     const int Hidden = 2048, Context = 4096, Vocabulary = 248320;
     readonly Metal gpu;
@@ -14,6 +14,7 @@ internal sealed class QwenEngine : IDisposable
     readonly GpuBuffer[] state = new GpuBuffer[40], convolution = new GpuBuffer[40], keyCache = new GpuBuffer[40], valueCache = new GpuBuffer[40], descriptors = new GpuBuffer[40];
     public ByteBpe Tokenizer { get; }
     public ulong AllocatedBytes => gpu.AllocatedBytes;
+    public bool BatchedPrefill { get; set; } = true;
     GpuBuffer Buffer(int floats) { var result = gpu.Allocate(checked((ulong)floats * 4)); owned.Add(result); return result; }
     public QwenEngine(string directory, string kernelPath, string manifestPath)
     {
@@ -117,7 +118,17 @@ internal sealed class QwenEngine : IDisposable
     {
         if (prompt.Length == 0 || maximum < 1 || prompt.Length + maximum > Context) throw new ArgumentException("Context window exceeded or empty request");
         Reset(); int predicted = -1; int position = 0;
-        foreach (int token in prompt) { cancellation.ThrowIfCancellationRequested(); predicted = Forward(token, position++, position == prompt.Length, ignoreEos); }
+        while (position < prompt.Length)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            int count = Math.Min(512, prompt.Length - position);
+            if (BatchedPrefill && count >= 8)
+            {
+                predicted = PrefillBlock(prompt.AsSpan(position, count), position, position + count == prompt.Length, ignoreEos);
+                position += count;
+            }
+            else predicted = Forward(prompt[position], position++, position == prompt.Length, ignoreEos);
+        }
         var generated = new List<int>(); var text = new StringBuilder(); Decoder decoder = Encoding.UTF8.GetDecoder(); string finish = "length";
         for (int i = 0; i < maximum; i++)
         {

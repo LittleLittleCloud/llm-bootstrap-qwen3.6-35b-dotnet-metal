@@ -79,11 +79,13 @@ internal sealed unsafe class Metal : IDisposable
     public void Clear(GpuBuffer buffer) => Check(Native.Clear(Handle, buffer.Handle));
     public void End() => Check(Native.End(Handle));
     public void Dispatch(string kernel, KernelArgs parameters, uint threads, uint group, params Binding[] bindings)
+        => Dispatch2D(kernel, parameters, threads, 1, group, bindings);
+    public void Dispatch2D(string kernel, KernelArgs parameters, uint threadsX, uint threadsY, uint group, params Binding[] bindings)
     {
         nint* handles = stackalloc nint[bindings.Length];
         ulong* offsets = stackalloc ulong[bindings.Length];
         for (int i = 0; i < bindings.Length; i++) { handles[i] = bindings[i].Buffer.Handle; offsets[i] = bindings[i].Offset; }
-        Check(Native.Dispatch(Handle, kernel, handles, offsets, bindings.Length, in parameters, sizeof(KernelArgs), threads, 1, 1, group, 1, 1));
+        Check(Native.Dispatch(Handle, kernel, handles, offsets, bindings.Length, in parameters, sizeof(KernelArgs), threadsX, threadsY, 1, group, 1, 1));
     }
     public void Dispose() { if (Handle != 0) { Native.Destroy(Handle); Handle = 0; } }
 }

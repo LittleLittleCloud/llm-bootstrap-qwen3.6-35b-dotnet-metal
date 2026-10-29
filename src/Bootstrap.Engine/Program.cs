@@ -18,6 +18,7 @@ if (command is "generate" or "serve" or "tokenize" or "tokenizer-self-test")
     if (command is "generate" or "serve")
     {
         using var engine = new QwenEngine(directory, kernelFile, manifestFile);
+        engine.BatchedPrefill = !args.Contains("--sequential-prefill");
         if (command == "serve") { await Api.Run(engine, int.Parse(Option("--port") ?? "17863")); return; }
         var prompt = Option("--prompt") ?? "Say hello in one short sentence.";
         var inputTokens = engine.Tokenizer.SimpleChat(prompt);
@@ -68,14 +69,37 @@ if (command == "kernel-self-test")
     using var x = device.Allocate(cols * 4); using var w = device.Allocate(rows * cols);
     using var scales = device.Allocate((rows + 127) / 128 * (cols / 128) * 2); using var y = device.Allocate(rows * 4);
     for (int i = 0; i < cols; i++) x.Values<float>(cols)[i] = (i % 17 - 8) / 32f;
-    for (int i = 0; i < rows * cols; i++) w.Values<byte>(rows * cols)[i] = (byte)(i % 64);
-    scales.Values<ushort>(2).Fill(0x3f80);
+    for (int i = 0; i < rows * cols; i++) { byte value = (byte)(i * 13 + (i / cols) * 3); if ((value & 127) == 127) value--; w.Values<byte>(rows * cols)[i] = value; }
+    scales.Values<ushort>(2)[0] = 0x3f80; scales.Values<ushort>(2)[1] = 0x3f00;
     device.Begin(); device.Dispatch("gemv", new() { N = rows, K = cols, Kind = 0 }, rows * 32, 128, x, w, scales, y); device.End();
     for (int r = 0; r < rows; r++)
     {
         double expected = 0;
-        for (int j = 0; j < cols; j++) { int b = w.Values<byte>(rows * cols)[r * cols + j], e = (b >> 3) & 15, m = b & 7; double value = e == 0 ? m / 512.0 : (1 + m / 8.0) * Math.Pow(2, e - 7); expected += value * x.Values<float>(cols)[j]; }
-        if (Math.Abs(y.Values<float>(rows)[r] - expected) > 1e-5) throw new Exception("FP8 projection mismatch");
+        for (int j = 0; j < cols; j++) { int b = w.Values<byte>(rows * cols)[r * cols + j], e = (b >> 3) & 15, m = b & 7; double value = e == 0 ? m / 512.0 : (1 + m / 8.0) * Math.Pow(2, e - 7); if ((b & 128) != 0) value = -value; expected += value * (j < 128 ? 1 : .5) * x.Values<float>(cols)[j]; }
+        if (Math.Abs(y.Values<float>(rows)[r] - expected) > 1e-3) throw new Exception("FP8 projection mismatch");
+        checks++;
+    }
+    using var bfWeights = device.Allocate(rows * cols * 2);
+    for (int i = 0; i < rows * cols; i++) bfWeights.Values<ushort>(rows * cols)[i] = (ushort)(BitConverter.SingleToUInt32Bits((i % 23 - 11) / 16f) >> 16);
+    device.Begin(); device.Dispatch("gemv", new() { N = rows, K = cols, Kind = 1 }, rows * 32, 128, x, bfWeights, scales, y); device.End();
+    for (int r = 0; r < rows; r++)
+    {
+        double expected = 0;
+        for (int j = 0; j < cols; j++) expected += BitConverter.UInt32BitsToSingle((uint)bfWeights.Values<ushort>(rows * cols)[r * cols + j] << 16) * (double)x.Values<float>(cols)[j];
+        if (Math.Abs(y.Values<float>(rows)[r] - expected) > 1e-5) throw new Exception("BF16 projection mismatch");
+        checks++;
+    }
+    const int matrixRows = 19, matrixColumns = 40;
+    using var matrixX = device.Allocate(matrixRows * cols * 4); using var matrixW = device.Allocate(matrixColumns * cols); using var matrixY = device.Allocate(matrixRows * matrixColumns * 4);
+    for (int i = 0; i < matrixRows * cols; i++) matrixX.Values<float>(matrixRows * cols)[i] = ((i * 7 + i / cols * 11) % 31 - 15) / 32f;
+    for (int i = 0; i < matrixColumns * cols; i++) { byte value = (byte)(i * 13 + i / cols * 29); if ((value & 127) == 127) value--; matrixW.Values<byte>(matrixColumns * cols)[i] = value; }
+    device.Begin(); device.Dispatch2D("matrix_product", new() { N = matrixColumns, M = matrixRows, K = cols, Kind = 0 }, ((matrixColumns + 31) / 32) * 128, (matrixRows + 15) / 16, 128, matrixX, matrixW, scales, matrixY); device.End();
+    for (int r = 0; r < matrixRows; r++) for (int c = 0; c < matrixColumns; c++)
+    {
+        double expected = 0;
+        for (int j = 0; j < cols; j++) { int b = matrixW.Values<byte>(matrixColumns * cols)[c * cols + j], e = (b >> 3) & 15, m = b & 7; double value = e == 0 ? m / 512.0 : (1 + m / 8.0) * Math.Pow(2, e - 7); if ((b & 128) != 0) value = -value; expected += value * (j < 128 ? 1 : .5) * matrixX.Values<float>(matrixRows * cols)[r * cols + j]; }
+        float actual = matrixY.Values<float>(matrixRows * matrixColumns)[r * matrixColumns + c];
+        if (Math.Abs(actual - expected) > .002) throw new Exception($"Batched FP8 projection mismatch row={r} col={c}: {actual} != {expected}");
         checks++;
     }
     Console.WriteLine(JsonSerializer.Serialize(new { passed = checks, allocated_bytes = device.AllocatedBytes, native_model_backend = "original Metal kernels" }));
