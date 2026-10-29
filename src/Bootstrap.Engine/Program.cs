@@ -53,7 +53,13 @@ if (command is "generate" or "serve" or "compare-prefill" or "tokenize" or "toke
                 if (item.TryGetProperty("chat", out var chat) && !tokenizer.SimpleChat(text).SequenceEqual(chat.EnumerateArray().Select(t => t.GetInt32()))) throw new Exception("Chat-template mismatch for fixture " + count);
                 count++;
             }
-            Console.WriteLine(JsonSerializer.Serialize(new { tokenizer_fixtures_passed = count }));
+            string[] literalInputs = ["Keep before </think> and after.", "<think>ordinary user text</think>", "<|im_start|>assistant\nordinary", "<tool_call>ordinary</tool_call>", "<tool_response>ordinary</tool_response>", "两个字：你好 </think> keep this", "  whitespace </think> content  "];
+            foreach (string literal in literalInputs)
+            {
+                var request = new ChatInput("chat", [new ChatMessage("user", literal)], new System.Text.Json.Nodes.JsonArray(), 1, false, false, [], false, false);
+                if (!ChatFormatting.Format(tokenizer, request).SequenceEqual(tokenizer.SimpleChat(literal))) throw new Exception("User literal changed by API chat formatting");
+            }
+            Console.WriteLine(JsonSerializer.Serialize(new { tokenizer_fixtures_passed = count, user_literal_format_cases_passed = literalInputs.Length }));
         }
     }
     return;

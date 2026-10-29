@@ -186,7 +186,7 @@ internal static class ChatFormatting
             }
             Control("<|im_start|>"); Plain(message.Role + "\n");
             if (message.Role == "assistant" && i > lastUser) { Control("<think>"); Plain("\n\n"); Control("</think>"); Plain("\n\n"); }
-            string content = message.Text.Trim(); int endThink = content.LastIndexOf("</think>", StringComparison.Ordinal); if (endThink >= 0) content = content[(endThink + 8)..].TrimStart('\n');
+            string content = message.Text.Trim(); int endThink = content.LastIndexOf("</think>", StringComparison.Ordinal); if (message.Role == "assistant" && endThink >= 0) content = content[(endThink + 8)..].TrimStart('\n');
             Plain(content);
             if (message.Calls is { Count: > 0 })
             {
