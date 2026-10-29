@@ -1,0 +1,275 @@
+{
+  "experiment_id": "2026-10-29-bootstrap-dogfood-001",
+  "status": "draft-not-run",
+  "description": "Bring up a self-implemented inference engine for official Qwen3.6-35B-A3B-FP8 on the local Apple M5 Pro (20 GPU cores, 48 GiB unified memory). Planned acceptance targets supplied by the user: prefill >= 500 tokens/s and decode >= 50 tokens/s, in addition to functional and correctness gates. No fixed budget; stop on user request. No candidate measurements have been obtained.",
+  "skills_revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
+  "builder_instruction_hashes": null,
+  "contract_frozen_at": null,
+  "scope": "New experiment on the local M5 Pro: bring up a self-implemented inference engine for the user-selected official FP8 checkpoint, with planned prefill >= 500 tokens/s and decode >= 50 tokens/s. Official model/weight discovery is delegated to the agent. The user set no fixed time, token, API cost, or hardware-hour cap and instructed the agent to stop on user request. Contract/evaluation stage gates remain in effect. A baseline may provide an independent reference; an existing inference-engine backend cannot serve as the candidate implementation. Operating-system changes and results publication have not been requested.",
+  "hardware": {
+    "platform": "Apple M5 Pro",
+    "gpu_cores": 20,
+    "memory_gib": 48,
+    "os_version": "macOS 26.6.2 (25G83); Darwin 25.6.0; Metal 4",
+    "toolchain": "Observed: .NET SDK 10.0.100 and 11.0.100-rc.1.26425.128 (osx-arm64); Apple clang 21.0.0 (clang-2100.3.34.2); Metal 4; Node.js v26.7.0 for planning checks. No project global.json exists yet. xcrun could not locate the offline Metal compiler; runtime Metal shader compilation is to be checked before freeze.",
+    "power": "Observed AC power, battery charged; configured powermode=2 for AC and battery. No power settings modified; re-observe before each run.",
+    "gpu_memory_limit": null,
+    "exclusive_gpu": null
+  },
+  "target_model": {
+    "repository": "Qwen/Qwen3.6-35B-A3B-FP8",
+    "revision": "95a723d08a9490559dae23d0cff1d9466213d989",
+    "file_hash_manifest": [
+      {
+        "name": "layers-0.safetensors",
+        "sha256": "969ed52b6d4a45e1c919115aed81a48a00004625a0406eebf630e829ff97c5bf"
+      },
+      {
+        "name": "layers-1.safetensors",
+        "sha256": "9b6714f0a7b7f9f7ed9eceefc31af655de1863bd83a23d735aa8dbad2cc03dfe"
+      },
+      {
+        "name": "layers-10.safetensors",
+        "sha256": "5cc57c2d6e18830429e2c9ea27a0b7d15e6502c74463d3d4ec6b621c699a5ef8"
+      },
+      {
+        "name": "layers-11.safetensors",
+        "sha256": "0f85558bc82b754230204607f55a3035fd39a6ad4e7f0f5613aa40a632566cab"
+      },
+      {
+        "name": "layers-12.safetensors",
+        "sha256": "0eb974e0b80092a722d10140647aedc14647831007ea7d898b892064c9fb4d0d"
+      },
+      {
+        "name": "layers-13.safetensors",
+        "sha256": "7d4bbdc09e40a3ccfa503c5149c7bb477b07bf8a75ca81613aa68031d995cbf8"
+      },
+      {
+        "name": "layers-14.safetensors",
+        "sha256": "0c6c07e10d047dd742b90fdfdbe734d5b4627fcae7728f8319413194c8d6f171"
+      },
+      {
+        "name": "layers-15.safetensors",
+        "sha256": "786c965fcbc9544aa97524e986ff7e1e2303b6c22812249b283b8c590ada7a77"
+      },
+      {
+        "name": "layers-16.safetensors",
+        "sha256": "dbbaab6eef74ab4f24d374ce94203c8f439019a26d322d8b02fb1cee6ed70267"
+      },
+      {
+        "name": "layers-17.safetensors",
+        "sha256": "29a35db86d591da297ac0ff46f773bf5e5386035172b6c637e00cf0786b0fdc9"
+      },
+      {
+        "name": "layers-18.safetensors",
+        "sha256": "99db8f52e91928e6a362c4510b15112c0c5d2eb0e9279b3413ec1db2016f1b2b"
+      },
+      {
+        "name": "layers-19.safetensors",
+        "sha256": "b1bc3e93c3a22adc01a77b4a2d5e2171e9588e2478ed648526596700ffa566c7"
+      },
+      {
+        "name": "layers-2.safetensors",
+        "sha256": "7ca3668d7dde8c47e796186f9a459afe6f86a60e547bc2f72fcc87543e4a718e"
+      },
+      {
+        "name": "layers-20.safetensors",
+        "sha256": "027f68acf35eb9e9fc41ae12154c18da1b0126bee7eaf16a177cfcbeaafbc7a6"
+      },
+      {
+        "name": "layers-21.safetensors",
+        "sha256": "79205dfb7fe145b26e5941f1b9590a870bc9e1df3127a67bd1ac32f1a12ad75f"
+      },
+      {
+        "name": "layers-22.safetensors",
+        "sha256": "94e7674ffb28f4cd9cf8859c6d0440cbd5d4d3a6dc33193a0442642ae303cd17"
+      },
+      {
+        "name": "layers-23.safetensors",
+        "sha256": "51a7c63c51959faa40c369c80ddac42233cd13d7ad6603e75574bbeeca72e98d"
+      },
+      {
+        "name": "layers-24.safetensors",
+        "sha256": "8c64b42cb8abc93ff5e5ac801c556da6eb81545a151c10320618bae250c9efd9"
+      },
+      {
+        "name": "layers-25.safetensors",
+        "sha256": "18ca830020bd0c7af5f99257112e1c5ba457673d4fd926e6eafcb3127edb06b5"
+      },
+      {
+        "name": "layers-26.safetensors",
+        "sha256": "a3fcd9cfeeb8ef52b749041df0986865cd2b6822a67bd69d0e0692571e49cfde"
+      },
+      {
+        "name": "layers-27.safetensors",
+        "sha256": "48829a4c312ecaf44e03bd9266245549982c326c0311b37694eb29dde4f30c62"
+      },
+      {
+        "name": "layers-28.safetensors",
+        "sha256": "9e40e51e6b2fbd04642cdfe3e66f4936bb74ef880ea8ff5417ec2075c47a938f"
+      },
+      {
+        "name": "layers-29.safetensors",
+        "sha256": "154e2b6da74a5c7921382d1738a57d4a7a9465594f68aa2f7e269340cef27d76"
+      },
+      {
+        "name": "layers-3.safetensors",
+        "sha256": "9ebbd0a7aa2f82f516ec339b66b317f5a7d710d244c42d00f4fea22478bac7da"
+      },
+      {
+        "name": "layers-30.safetensors",
+        "sha256": "292aa0e63dfbd0c757945021b0995b83d7f561985202df9fbfe591c61911f9fa"
+      },
+      {
+        "name": "layers-31.safetensors",
+        "sha256": "21073b1a747d3736b46dc4f84ed66ae287ee3acb699807757a06d77de98af99e"
+      },
+      {
+        "name": "layers-32.safetensors",
+        "sha256": "52e7905b111b6fbfb2b91b9f5b4fd748e61c93cbd39e988d1fabbcd9e00f4f20"
+      },
+      {
+        "name": "layers-33.safetensors",
+        "sha256": "bcc4ad3526f6bb99ae9af57cc319da6bfd69228e5d0bcbd678590323f240cccb"
+      },
+      {
+        "name": "layers-34.safetensors",
+        "sha256": "f52d1343ed110f00a661fcdc17e530a5f3c22a9397469bd2f41e22c8a2ffe9f1"
+      },
+      {
+        "name": "layers-35.safetensors",
+        "sha256": "a079648624f32732831382efa86c72bf03bc58336dcfe6b8ae11f4fcba33e2ea"
+      },
+      {
+        "name": "layers-36.safetensors",
+        "sha256": "f293aff9b2498b7a86303bfb928a03b62b1763bf71f0fe35c14d2d1712292673"
+      },
+      {
+        "name": "layers-37.safetensors",
+        "sha256": "918c26a832494ea368013e5fce8dba0e98923cc62f69d0b21f752dfeb241d404"
+      },
+      {
+        "name": "layers-38.safetensors",
+        "sha256": "2cd43a74c05a8f112c4f137f8139f217601a6035f6474c256b4bac315ccf5c39"
+      },
+      {
+        "name": "layers-39.safetensors",
+        "sha256": "0e347a8527fb41e4dde7e92a359feb0709d770d2b7ab4f2081c940205b85dba9"
+      },
+      {
+        "name": "layers-4.safetensors",
+        "sha256": "3fda002efe01809173b2a9179d529e04f1a9e28d58038cf47fea02b1251c544e"
+      },
+      {
+        "name": "layers-5.safetensors",
+        "sha256": "85f08db02168b263497757002827eb15c44c9ae46962ec26f19a648a0f5fb826"
+      },
+      {
+        "name": "layers-6.safetensors",
+        "sha256": "0601aa7cd21d29efdd6330614aaff2b9a7e4b599d1de894fdb50525033c8725a"
+      },
+      {
+        "name": "layers-7.safetensors",
+        "sha256": "ec6d9082f26b2e3d6010114cac16d71626836a53812782690bce582bf2baac51"
+      },
+      {
+        "name": "layers-8.safetensors",
+        "sha256": "a4284bb825ff85f6166208edfb8315897771db03dae82a078bc69014c695502a"
+      },
+      {
+        "name": "layers-9.safetensors",
+        "sha256": "f2bc291ccdccde1094f34e5d2f506e2b8a3857327faa9ffbd2d3a5d75de9d23a"
+      },
+      {
+        "name": "mtp.safetensors",
+        "sha256": "3e9c9fef90a5c02314cf27eeccc72f9f61ce711c12c869244c7127c787b5bd7d"
+      },
+      {
+        "name": "outside.safetensors",
+        "sha256": "bb9755bc8ebd638e6a9994ae75064f9a6ac3f56541c00a10a90b7a930d24cc4f"
+      }
+    ],
+    "tokenizer_hash": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "chat_template_hash": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+    "weights": "Official FP8 E4M3 checkpoint with 128x128 block scaling for quantized weights and BF16 tensors where excluded from quantization. Preserve this checkpoint representation; do not substitute affine INT8 or INT4. Activation, KV, and recurrent-state precision remain unresolved.",
+    "activation_precision": null,
+    "kv_precision": null,
+    "recurrent_state_precision": null,
+    "speculative_decoding": null,
+    "speculative_draft": null
+  },
+  "builder": {
+    "model": null,
+    "provider": null,
+    "revision_or_exposed_identifier": null,
+    "initial_inference_location": null,
+    "sampling_settings": null,
+    "network_and_source_access": null
+  },
+  "development_harness": {
+    "name": null,
+    "version": null,
+    "revision_or_package_hash": null
+  },
+  "evaluation": {
+    "definition": {
+      "evaluation_id": "engine-throughput",
+      "revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
+      "sha256": "b5857229e97b2d2451e0d89f9c43b4e95269cb33bc3fed6221c21de54308c0a5"
+    },
+    "warmup_plan": "One complete warm-up pass of each selected repository-defined workload (--warmup 1), excluded from formal metrics. Run endpoint conformance first. Initial selected workloads are prefill.in2k.out1 and decode.in128.out256; retain the selection in result settings.",
+    "formal_repetitions": 3
+  },
+  "implementation": {
+    "starting_scaffold": null,
+    "language_and_backend": "User-selected .NET (C#) host with independently implemented Metal compute kernels for Apple Silicon. Implement weight loading, model execution, attention/recurrent state, and generation in the candidate; any native interop bridge must be limited to invoking Metal/platform APIs and must not wrap an existing LLM inference engine. SDK and binding package pins are resolved before freeze.",
+    "allowed_libraries": null,
+    "baseline_source_inspection_allowed": null,
+    "existing_engine_backend_allowed": false
+  },
+  "baselines": {
+    "selection_date": null,
+    "selection_method": null,
+    "engines_and_revisions": [],
+    "comparison_track": "matched-configuration"
+  },
+  "goal": {
+    "primary_metric": "Use the pinned engine-throughput headline workloads prefill.in2k.out1 and decode.in128.out256. Prefill throughput is processed uncached prompt tokens divided by client dispatch-to-first-output-chunk time, including queueing, transfer, and the first sampled token. Decode is the ratio of summed N-1 output-token intervals to summed first-to-last output-chunk durations, subject to the repository driver chunk-density gate. The 500/50 tokens/s values are planned acceptance targets, not measurements.",
+    "performance_thresholds": [
+      {
+        "metric": "prefill_throughput",
+        "comparator": "at-least",
+        "threshold": 500,
+        "unit": "tokens/s"
+      },
+      {
+        "metric": "decode_throughput",
+        "comparator": "at-least",
+        "threshold": 50,
+        "unit": "tokens/s"
+      }
+    ],
+    "quality_gate": "Load the selected official FP8 model and generate through the independently implemented .NET + Metal inference path. Pass the pinned engine-api-conformance gate before throughput measurement. Apply the repository-owned workload length, usage, cache, and streaming gates and record every failed pass. Numerical equivalence to a reference implementation is not required by the updated protocol. HumanEval application scoring is a separately available evaluation, not selected in this initial throughput experiment.",
+    "resource_limits": null,
+    "self_hosting_in_scope": false
+  },
+  "budget": {
+    "wall_clock_hours": {
+      "not_applicable": true,
+      "reason": "The user set no fixed wall-clock time cap and instructed the agent to stop on user request. This declares an unbounded budget, not a zero allowance or a measured cost."
+    },
+    "builder_tokens": {
+      "not_applicable": true,
+      "reason": "The user set no fixed builder tokens cap and instructed the agent to stop on user request. This declares an unbounded budget, not a zero allowance or a measured cost."
+    },
+    "api_cost_limit": {
+      "not_applicable": true,
+      "reason": "The user set no fixed API cost cap and instructed the agent to stop on user request. This declares an unbounded budget, not a zero allowance or a measured cost."
+    },
+    "hardware_hours": {
+      "not_applicable": true,
+      "reason": "The user set no fixed hardware hours cap and instructed the agent to stop on user request. This declares an unbounded budget, not a zero allowance or a measured cost."
+    },
+    "stopping_rule": "No budget-derived stopping limit. Stop promptly on explicit user request and preserve partial work and evidence. Required experiment stage gates remain in effect; an unresolved prerequisite blocks dependent work. Report a completed functional outcome when its acceptance gates are met."
+  }
+}
