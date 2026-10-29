@@ -20,7 +20,7 @@ internal static class Api
                 {
                     var body = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted) as JsonObject ?? throw new ArgumentException("Expected a JSON object");
                     var input = ChatParsing.Parse(body, api); int[] prompt = ChatFormatting.Format(engine.Tokenizer, input);
-                    if (prompt.Length + input.Maximum > 4096) throw new ArgumentException("Context window exceeded");
+                    if (prompt.Length + input.Maximum > engine.ContextWindow) throw new ArgumentException("Context window exceeded");
                     await serial.WaitAsync(context.RequestAborted); acquired = true;
                     var writer = new ApiWriter(context, input, body, prompt.Length);
                     await writer.Start();
@@ -64,7 +64,7 @@ internal static class Api
                 }
                 finally { if (acquired) serial.Release(); }
             });
-        Console.Error.WriteLine($"Candidate model ready; Metal buffer bytes={engine.AllocatedBytes}; context=4096; original .NET + Metal execution only.");
+        Console.Error.WriteLine($"Candidate model ready; Metal buffer bytes={engine.AllocatedBytes}; context={engine.ContextWindow}; original .NET + Metal execution only.");
         await app.RunAsync();
     }
 }

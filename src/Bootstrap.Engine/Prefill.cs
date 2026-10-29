@@ -53,7 +53,7 @@ internal sealed partial class QwenEngine
                 Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
                 var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = Context, Theta = 10_000_000f };
                 gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
-                gpu.Dispatch("batch_attention_scores", p, checked((uint)(count * 16 * (position + count) * 32)), 128, b.Rotated, keyCache[layer], b.Scores);
+                gpu.Dispatch2D("batch_attention_scores", p, checked((uint)(position + count) * 32), checked((uint)count * 16), 128, b.Rotated, keyCache[layer], b.Scores);
                 var normalization = p; normalization.Position = (uint)(position + count - 1);
                 gpu.Dispatch("attention_softmax", normalization, checked((uint)count * 16 * 256), 256, b.Scores);
                 gpu.Dispatch("batch_attention_values", p, checked((uint)count * 4096), 128, b.Scores, valueCache[layer], b.Qgate, b.Rotated);

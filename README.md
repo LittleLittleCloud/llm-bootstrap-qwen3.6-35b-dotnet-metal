@@ -15,8 +15,9 @@ architecture, but no backend code was copied.
 The model is official `Qwen/Qwen3.6-35B-A3B-FP8`, pinned at
 `95a723d08a9490559dae23d0cff1d9466213d989`. Packed E4M3 weights and their block
 scales are read directly; source BF16 tensors retain their values. Computation,
-KV and recurrent state are FP32. The initial served window is 4096 tokens;
-vision, MTP and speculation are excluded. Greedy text generation has thinking
+KV and recurrent state are FP32. The default served window is 4096 tokens; `--context-window` configures 512 through
+32768 tokens.
+Vision, MTP and speculation are excluded. Greedy text generation has thinking
 disabled. No OS memory/power limits are modified. All model files are external
 to Git and are checked against the manifest.
 
@@ -87,3 +88,15 @@ The baseline uses independently pinned affine8/BF16 MLX-LM and a generic protoco
 adapter; it is not precision-matched to this official FP8/FP32 engine. No controlled
 speedup, SOTA, HumanEval, autonomy or self-hosting claim is made. Model weights,
 binaries and raw private evidence are not in Git.
+
+For the supplemental Pi HumanEval campaign, start the server with
+`--context-window 32768`; Pi reserves up to 4096 output tokens in addition to its
+input/tool history. API and engine checks share this configured total-token
+window, and KV/attention workspaces are allocated accordingly. The 4096 output
+budget cap is separate. A 2D attention score grid avoids overflowing a flattened
+32-bit thread count at longer positions.
+
+`context-self-test --model-dir /path/to/snapshot --context-window 32768` exercises
+a public arithmetic fixture longer than 4096 prompt tokens and overflow rejection.
+Kernel checks independently test attention scores and causal masking near the
+32768-token boundary. These checks are not a HumanEval score.
