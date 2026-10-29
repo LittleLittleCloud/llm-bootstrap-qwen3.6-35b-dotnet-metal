@@ -15,7 +15,7 @@ internal sealed class ByteBpe
     readonly byte[][] decoded;
     readonly char[] byteToChar = new char[256];
     readonly Regex split;
-    readonly Dictionary<string, int[]> cache = new(StringComparer.Ordinal);
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, int[]> cache = new(StringComparer.Ordinal);
     public int End => specials["<|im_end|>"];
     public int EndOfText => specials["<|endoftext|>"];
     public ByteBpe(string path, string expectedHash)

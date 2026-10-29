@@ -113,7 +113,7 @@ internal sealed class QwenEngine : IDisposable
         }
         gpu.End(); return output ? next.Values<int>(1)[0] : -1;
     }
-    public Generation Generate(int[] prompt, int maximum, bool ignoreEos, Action<string>? onText = null, CancellationToken cancellation = default)
+    public Generation Generate(int[] prompt, int maximum, bool ignoreEos, Func<string, bool>? onText = null, CancellationToken cancellation = default)
     {
         if (prompt.Length == 0 || maximum < 1 || prompt.Length + maximum > Context) throw new ArgumentException("Context window exceeded or empty request");
         Reset(); int predicted = -1; int position = 0;
@@ -124,7 +124,7 @@ internal sealed class QwenEngine : IDisposable
             cancellation.ThrowIfCancellationRequested(); generated.Add(predicted);
             if (!ignoreEos && (predicted == Tokenizer.End || predicted == Tokenizer.EndOfText)) { finish = "stop"; break; }
             byte[] bytes = Tokenizer.TokenBytes(predicted); char[] chars = new char[bytes.Length + 4]; int count = decoder.GetChars(bytes, chars, flush: false);
-            string piece = new(chars, 0, count); text.Append(piece); if (piece.Length > 0) onText?.Invoke(piece);
+            string piece = new(chars, 0, count); text.Append(piece); if (piece.Length > 0 && onText is not null && !onText(piece)) { finish = "stop"; break; }
             if (i + 1 < maximum) predicted = Forward(predicted, position++, true, ignoreEos);
         }
         return new(text.ToString(), prompt.Length, generated.ToArray(), finish);

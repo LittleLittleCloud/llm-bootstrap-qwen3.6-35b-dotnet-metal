@@ -11,17 +11,18 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
-if (command is "generate" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command == "generate")
+    if (command is "generate" or "serve")
     {
         using var engine = new QwenEngine(directory, kernelFile, manifestFile);
+        if (command == "serve") { await Api.Run(engine, int.Parse(Option("--port") ?? "17863")); return; }
         var prompt = Option("--prompt") ?? "Say hello in one short sentence.";
         var inputTokens = engine.Tokenizer.SimpleChat(prompt);
         Console.Error.WriteLine($"Model ready; {engine.AllocatedBytes} Metal buffer bytes; {inputTokens.Length} prompt tokens");
-        var result = engine.Generate(inputTokens, int.Parse(Option("--max-tokens") ?? "32"), args.Contains("--ignore-eos"), piece => Console.Error.Write(piece));
+        var result = engine.Generate(inputTokens, int.Parse(Option("--max-tokens") ?? "32"), args.Contains("--ignore-eos"), piece => { Console.Error.Write(piece); return true; });
         Console.Error.WriteLine(); Console.WriteLine(JsonSerializer.Serialize(result));
     }
     else
