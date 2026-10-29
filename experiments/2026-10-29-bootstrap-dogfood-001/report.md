@@ -1,108 +1,87 @@
 # Experiment: 2026-10-29-bootstrap-dogfood-001
 
-Status: Frozen; candidate build not started. Acceptance: Unverified. Baseline preparation/preflight completed before freeze; no candidate implementation or formal candidate run has started.
+Status: Completed. Acceptance: Passed in candidate 004: **513.602 prefill tokens/s and 53.641 decode tokens/s**, exceeding the frozen 500/50 targets. All earlier failed candidates remain included. Results cover the two selected workloads, not general model quality.
 
 ## Question and frozen contract
 
-- Hypothesis and platform-specific goal: Bring up a self-implemented .NET + Metal inference engine for official Qwen3.6-35B-A3B-FP8 on the local M5 Pro. User-supplied acceptance targets: prefill >= 500 tokens/s and decode >= 50 tokens/s.
-- Contract file, revision, and freeze timestamp: `experiments/2026-10-29-bootstrap-dogfood-001/contract.json`; not frozen, no freeze commit or timestamp.
-- Skill repository full SHA and instruction hashes: Updated installed skills to `9b71eb126c862a8c185272e5b68a26a55e953cb9`. All 17 skill/support files match a fresh detached checkout. Plugin semantic version remains 0.1.0. Full builder instruction hashes remain to be recorded before freeze. This supersedes the old planning treatment; the previous draft is preserved in ignored local evidence.
-- Starting engine/scaffold SHA and permitted reuse/dependencies: No engine implementation exists. User-selected C#/.NET host plus independently implemented Metal compute kernels. Existing LLM inference backends are disallowed as the candidate backend. Scaffold/dependency pins remain unresolved.
-- Hardware, OS, driver, compiler, power and memory limits: Apple M5 Pro; 20 GPU cores; 48 GiB unified memory; macOS 26.6.2 (25G83); Darwin 25.6.0; Metal 4. Observed: .NET SDK 10.0.100 and 11.0.100-rc.1.26425.128 (osx-arm64); Apple clang 21.0.0 (clang-2100.3.34.2); Metal 4; Node.js v26.7.0 for planning checks. No project global.json exists yet. xcrun could not locate the offline Metal compiler; runtime Metal shader compilation is to be checked before freeze. AC power observed; memory limits, thermal observations, and GPU contention still need preflight.
-- Target model/revision; weight/tokenizer hashes; all precisions: Official `Qwen/Qwen3.6-35B-A3B-FP8`, revision `95a723d08a9490559dae23d0cff1d9466213d989`. FP8 E4M3 with 128x128 block scaling and excluded BF16 tensors. Contract contains 42 expected upstream shard hashes; weight blobs are not downloaded or locally verified. Tokenizer hash `5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42` and chat-template hash `e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259` were locally verified. Activations, KV, recurrent-state precision, and speculation settings remain unresolved.
-- Builder model/provider/identifier, initial inference location, and tool access: Unresolved. Record actual exposed identity; mark unavailable provider details instead of fabricating them.
-- Development harness version/hash: Unresolved. Local Codex CLI 0.157.0 was observed; desktop/harness identity must be pinned separately.
-- Evaluation reference (id, repository revision, definition hash), warm-up, and formal repetitions: `engine-throughput`, revision `9b71eb126c862a8c185272e5b68a26a55e953cb9`, definition SHA-256 `b5857229e97b2d2451e0d89f9c43b4e95269cb33bc3fed6221c21de54308c0a5`. One warm-up and three formal repetitions; initial selected workloads are `prefill.in2k.out1` and `decode.in128.out256`. Endpoint conformance runs first at the same revision, definition SHA-256 `d710a08a4c2ce736652c3a96cb911bed4e1fe34683cda37935e736938b473081`. All scripts for the three released evaluations were hash-verified in the fresh checkout. No evaluation was executed.
-- Baseline engines/revisions, selection date/method, and comparison tracks: Matched-configuration track; baseline candidates/revisions and baseline preflight remain unresolved.
-- Primary metric, quality/resource gates: Not obtained; no formal run has occurred.
-- Budget and stopping rule: No fixed time, builder-token, API-cost, or hardware-hour budget; stop on explicit user request and preserve partial progress. This does not waive required stage gates.
-- Scope authorization and unresolved fields: The user selected new experiment, local M5 Pro, official FP8, .NET + Metal, targets 500/50 tokens/s, no fixed budget, and requested the bootstrap skill update. Evaluation availability and mandatory numerical-equivalence blockers are resolved by the new upstream version. Execution configuration and baseline preflight still need completion before freeze.
+Build an independent .NET + Metal engine that loads official Qwen3.6-35B-A3B-FP8 and serves text generation on the local Apple M5 Pro. Frozen targets are prefill >=500 tokens/s and decode >=50 tokens/s on the two selected repository-defined headline workloads.
+
+The [contract](contract.json) was frozen at `2026-10-29T14:48:23-07:00` and committed as `5f7f7099be4a7c261140d6fbc4f800d7065266e1` before candidate implementation. Its SHA-256 is `bbe28f083c4afd6a8593a12dbfb73877e3c605889ab9809dd91d4cbd7ce08adf`. No amendments were made. The empty engine scaffold was `5fe496f89f7bd68eeb6ffc2f2f2efef375771c5e`. The [implementation PR](https://github.com/LittleLittleCloud/llm-bootstrap-qwen3.6-35b-dotnet-metal/pull/1) is separate from results. The implementation repository is private: access is available to its owner and authorized collaborators, not public readers. The [frozen contract commit](https://github.com/LittleLittleCloud/llm-bootstrap-qwen3.6-35b-dotnet-metal/commit/5f7f7099be4a7c261140d6fbc4f800d7065266e1) is retained on its private contract-history branch.
+
+The treatment is skills revision `9b71eb126c862a8c185272e5b68a26a55e953cb9`; all 17 installed skill/support files matched that source. The contract lists the exact builder instruction hashes. Semantic plugin version 0.1.0 alone is insufficient to identify this treatment. Earlier planning at `744d5caa2545852f9c43d82863e059a24d78344f` was superseded before freeze; no candidate run used that treatment.
+
+Hardware: Apple M5 Pro, 20 GPU cores, 48 GiB unified memory; macOS 26.6.2 (25G83), Darwin 25.6.0, Metal 4. Candidate toolchain is .NET SDK 10.0.100/.NET 10 and Apple clang 21.0.0. Runtime Metal compilation uses safe math. Observed recommended working set is 44,023,414,784 bytes (41 GiB), maximum individual buffer 30,150,672,384 bytes. AC power and configured powermode=2 were observed; no OS memory/power settings changed. Competing inference processes ran serially. GPU exclusivity and quantitative thermal stability are not claimed.
+
+Model: `Qwen/Qwen3.6-35B-A3B-FP8`, revision `95a723d08a9490559dae23d0cff1d9466213d989`. All 42 source shards were downloaded and hash-verified against the contract/manifest. Packed E4M3 storage and 128x128 BF16 block scales remain official; excluded BF16 tensors retain their values. All activation/accumulation, KV and recurrent/convolution state math is FP32. Tokenizer SHA-256 is `5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42`; chat-template SHA-256 is `e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259`. The engine executes all 40 text layers, top-8 of 256 experts, shared experts, gated-delta recurrence and gated full attention. It maps 41 shards excluding MTP; unused vision tensors are not executed. Context is 4096, greedy decoding, thinking off, speculation off. No existing inference backend is linked or called; CPU work is host tokenization/API/control/sampling only. Dependencies are the .NET shared runtime and original native interop calling Foundation, Metal and libc.
+
+Builder: OpenAI-hosted GPT-6-family Codex in this conversation. Exact deployed model/revision, decoding settings and desktop package hash were not exposed and remain unavailable. Codex CLI 0.157.0 was observed separately and is not treated as the desktop identity. Baseline source inspection was allowed; baseline implementation code was not copied. Self-hosting was not in scope.
+
+Evaluation: `engine-throughput` at `9b71eb126c862a8c185272e5b68a26a55e953cb9`, definition SHA-256 `b5857229e97b2d2451e0d89f9c43b4e95269cb33bc3fed6221c21de54308c0a5`. Selected workloads are exactly `prefill.in2k.out1,decode.in128.out256`, one complete warm-up and three formal passes, temperature/seed zero, `ignore_eos=true`, unique session nonces and no cached input tokens. The complete `engine-api-conformance` gate at the same revision runs first, definition SHA-256 `d710a08a4c2ce736652c3a96cb911bed4e1fe34683cda37935e736938b473081`. Definitions and script hashes were checked in the unmodified detached evaluation checkout. No experiment-specific evaluation code was substituted.
+
+There is no fixed time/token/API-cost/hardware-hour budget; the user stops the run on request. There is no additional numeric memory/swap cap, and no system-limit override is allowed. This is not a claim of zero cost or swap-free execution.
 
 ## Execution and evidence
 
-- Run IDs and timestamps/timezone: No runs. Skill update recorded at 2026-10-29T14:32:04-07:00 (America/Los_Angeles).
-- Actual runtime SHA and executable/kernel hashes, separate from checkout: Not obtained; no formal run has occurred.
-- Reproduction commands and configuration hashes: Not obtained; no formal run has occurred.
-- Warm-up, repetitions, resource sampling, and contention checks: Not obtained; no formal run has occurred.
-- Public raw evidence links or local-only locations with hashes: Ignored `evidence/` contains source/model discovery, prior contract/report snapshots, check logs, and skill-update verification. Weight hashes are expected upstream identities; tokenizer/template hashes were locally verified.
-- Human interventions and agent trajectory access/hash: User setup choices are summarized above. No manual implementation edits have occurred. Raw transcripts remain private.
-- Builder token/cost, hardware hours, elapsed time, and attempts: Not obtained; no formal run has occurred.
+- `2026-10-29-baseline-001`: `6992293876fe2e666923f7b19d17747611844a34`; 2026-10-29T21:49:00+00:00 to 2026-10-29T14:50:46-07:00. Exact deployed artifact hashes and launch commands are retained in [baseline-mlx-lm.json](runs/2026-10-29-baseline-001/baseline-mlx-lm.json).
+- `2026-10-29-candidate-001`: `07b41c5014426e6716c8ee2c6b2856c7f7d62a62`; 2026-10-29T22:10:22+00:00 to 2026-10-29T15:27:50-07:00. Exact deployed artifact hashes and launch commands are retained in [candidate-bootstrap-dotnet-metal-fp8.json](runs/2026-10-29-candidate-001/candidate-bootstrap-dotnet-metal-fp8.json).
+- `2026-10-29-candidate-002`: `29a7a0a65c99fe824a63d48fe60fe06f622df143`; 2026-10-29T22:37:07+00:00 to 2026-10-29T22:42:36.833999+00:00. Exact deployed artifact hashes and launch commands are retained in [candidate-bootstrap-dotnet-metal-fp8.json](runs/2026-10-29-candidate-002/candidate-bootstrap-dotnet-metal-fp8.json).
+- `2026-10-29-candidate-003`: `1d2d24572c78e702ad92ed878fc5f2d6dd1128d0`; 2026-10-29T22:50:04+00:00 to 2026-10-29T22:52:10.055496+00:00. Exact deployed artifact hashes and launch commands are retained in [candidate-bootstrap-dotnet-metal-fp8.json](runs/2026-10-29-candidate-003/candidate-bootstrap-dotnet-metal-fp8.json).
+- `2026-10-29-candidate-004`: `5d672cbc77829692d7d1eb3957970b8ec6cb83b1`; 2026-10-29T22:55:48+00:00 to 2026-10-29T22:57:28.566755+00:00. Exact deployed artifact hashes and launch commands are retained in [candidate-bootstrap-dotnet-metal-fp8.json](runs/2026-10-29-candidate-004/candidate-bootstrap-dotnet-metal-fp8.json).
+
+The independent baseline uses MLX-LM source `6b572ab1b531dd8fd2d13f6f36a89c2eccda18ea`, MLX 0.32.4, Python 3.12.13, and generic protocol adapter `6992293876fe2e666923f7b19d17747611844a34`. The adapter translates envelopes/input validation and forwards real model content/tool calls. Its checkpoint is `mlx-community/Qwen3.6-35B-A3B-8bit` at `e06a74e6236a60c8367e1a3214e83d8b61b637b0`, affine8/group64 with BF16 defaults, independently hash-verified. It is a disclosed best-permitted-configuration comparison, not precision-matched to official FP8/FP32. Raw E4M3 support and all three native API families were unavailable in the selected baseline. Other platforms/conversion-dependent engines were not measured; this is not an exhaustive SOTA comparison.
+
+The initial candidate (001) used sequential prefill and scalar packed weight reads. Candidate 002 added vectorized decode and layer-wise tiled prefill with GPU expert grouping; a 626-token real-model fixture produced exactly the sequential path's token IDs across the 512-token block boundary. Candidate 003 parallelized deterministic top-8 routing, preserving tie order and probabilities. Candidate 004 widened dense tiles to 32x64x64 and expert tiles to 16x64x64, vectorized FP8 staging, and reused threadgroup staging for output while retaining FP32 operands/accumulators. Its 626-token state-continuity check also passed. The initial smoke produced `Hello!`, tokens `[9419,0,248046]`. Bottom-level checks grew from 264 to 1032 and then 1112; six independent byte-BPE/chat-template fixtures passed. These are implementation checks, not numerical-equivalence or model-quality claims.
+
+The initial API binary was built immediately before its source commit 07b41c5: generated assembly metadata cites preceding 6c4906c, while the source content matches 07b41c5. Exact deployed artifacts were hashed. Later runtime source commits precede builds and embedded metadata matches. Tested runtime 004 is `5d672cbc77829692d7d1eb3957970b8ec6cb83b1`; final implementation head `2ad201acf2ff110070deee4a47cd4bc810544f16` changes README only. That documentation edit occurred during the immutable runtime measurement without rebuilding it. During candidate 001 measurement, future source was edited without rebuilding or executing another GPU engine; loaded artifacts remained unchanged. No machine-exclusivity claim follows.
+
+Complete conformance for the baseline and every formal candidate had 60 passes, one skipped advisory (`chat.stream.incremental`: too few output tokens to judge), zero failures/errors and verified negative controls. The advisory skip is not a pass. Per-request throughput records reconcile all six requests in each run; the repository driver's negative control was verified each time. Warm-ups and calibration are excluded from formal ratios. No HumanEval/application assertion suite was selected, so official coding assertions and general model-quality scores are **Not obtained**.
+
+Raw conformance, identities, setup/preflight results, diagnostics and request records are local-only. Each run lists their SHA-256 and access limitation; no raw transcripts, weights, binaries or private prompts are published. The pre-freeze setup baseline (one pass, no warm-up) measured 1770.88 prefill / 55.04 decode tokens/s; it is retained as local setup evidence, not a formal candidate or a three-pass result. Its result hash is `f14ce51769ceddb6dc3d4c754e806e407001a89a026b1b89388b97f0c0d61946`.
+
+Human interventions selected the experiment/model/hardware/FP8/.NET+Metal/targets/stopping rule, requested skill refreshes, and authorized completing and submitting the report. Exact original message timestamps and a complete costed agent trajectory are not exposed; human implementation edits were not observed. The contract pins the local builder-task artifact hash. Per-run builder tokens, API cost and separately metered hardware hours are **Not obtained**. Native per-request command timings were not instrumented; formal measurements use the repository client clock, with complete per-request client/token/gate evidence retained locally. Request/application durations below do not substitute for builder or hardware cost.
 
 ## Results
 
-Use “Not obtained” for unavailable values. Preserve all formal repetitions and failures.
+All throughput values below are formal measurements emitted by the pinned repository script, unchanged. Acceptance includes both frozen performance targets.
 
-| Metric / gate | Baseline | Candidate | Definition, coverage, and conditions |
-| --- | --- | --- | --- |
-| Official assertions / fixed task count | Not obtained | Not obtained | |
-| Prefill tokens / seconds / tok/s | Not obtained | Not obtained | |
-| Decode intervals / seconds / tok/s | Not obtained | Not obtained | N−1; native command metrics separate |
-| Client TTFT median / variability | Not obtained | Not obtained | |
-| Application duration and request/token totals | Not obtained | Not obtained | |
-| Memory, pressure, swap-out and resource gates | Not obtained | Not obtained | |
-| Errors / timeouts / incomplete tasks | Not obtained | Not obtained | |
+| Run | Prefill tokens/s | Decode tokens/s | Acceptance | Workload requests passed |
+| --- | ---: | ---: | --- | ---: |
+| 2026-10-29-baseline-001 | 1723.216 | 54.764 | unverified | 6/6 |
+| 2026-10-29-candidate-001 | 22.337 | 21.037 | failed | 6/6 |
+| 2026-10-29-candidate-002 | 316.216 | 29.187 | failed | 6/6 |
+| 2026-10-29-candidate-003 | 318.560 | 53.558 | failed | 6/6 |
+| 2026-10-29-candidate-004 | 513.602 | 53.641 | passed | 6/6 |
+
+Prefill is the ratio of summed processed uncached input tokens to summed client dispatch-to-first-output-chunk seconds, including queueing/transfer/first token. Decode is summed N-1 intervals divided by summed first-to-last output-chunk duration, gated by at least 0.9 chunks per reported output token. The actual chunk/token ratios were 1.0. The result documents retain token/second sums, all three individual repetition values and sample standard deviations. These are not command-only GPU timings. The fixed 2k prompts are sized within repository tolerance with each engine's reported usage, so exact input totals can differ; a matched request/token trace is not claimed.
+
+| Run | Sampled process RSS peak (GiB) | Whole-machine swap-out delta (bytes) | Application duration (seconds) |
+| --- | ---: | ---: | ---: |
+| 2026-10-29-baseline-001 | 0.102 | 0 | 18.423 |
+| 2026-10-29-candidate-001 | 0.483 | 0 | 327.716 |
+| 2026-10-29-candidate-002 | 0.833 | 0 | 47.304 |
+| 2026-10-29-candidate-003 | 1.128 | 0 | 35.197 |
+| 2026-10-29-candidate-004 | 0.782 | 0 | 27.24 |
+
+RSS was sampled every 0.5 seconds and may exclude GPU memory; it is not the model footprint. The candidate reported logical Metal buffer allocation of 36,846,419,968 bytes initially and 37,132,353,536 bytes with the batched workspace, within the unchanged recommended working set. These allocation bytes are not physical residency. Quantitative memory-pressure/thermal traces and complete total GPU residency are **Not obtained**. A zero whole-machine swap-out delta covers only the measured bracket and is not attributable to one process. No extra numeric memory/swap threshold was frozen.
+
+Final candidate sums: prefill **6152 processed tokens / 11.978137 seconds**; decode **765 N-1 intervals / 14.261576 seconds**. Prefill repetition rates were 514.4616, 513.1378 and 513.2105 tokens/s (sample SD 0.7442); decode rates were 53.7722, 53.7611 and 53.3904 tokens/s (sample SD 0.2173). Client prefill TTFT median was 3.996411 seconds; decode-workload TTFT median was 0.332865 seconds. Six output requests include three single-token prefill responses and three 256-token decode responses; there were no failed, timed-out or incomplete formal passes.
 
 ## Interpretation and disposition
 
-- Comparable conditions, differences, and limits of attribution: Not obtained; no formal run has occurred.
-- Variability/repetitions and unresolved correctness/resource concerns: Not obtained; no formal run has occurred.
-- Gap to each frozen target; bounded baseline/SOTA conclusion: Planned 500/50 tokens/s targets are unmeasured and not frozen. No baseline/SOTA claim.
-- Self-hosting transition and subsequent development evidence, or not demonstrated: Not in scope; no self-hosting claim.
-- Failures, amendments, recovery, and next steps: No engine failure. Complete remaining execution configuration and baseline preflight, then commit the frozen contract before engine work.
-- Implementation PR, independent results PR, and adoption decision: No implementation, results, pull requests, or adoption decision. No project remote is configured.
+- **Passed:** independently implemented .NET + Metal loads the pinned official FP8 checkpoint and generates through the full text model; complete three-family endpoint conformance before performance; fixed workload/usage/cache/stream gates; official weight precision and FP32 state/compute retained; 4096-token limit/reset/recovery; no OS changes.
+- **Passed in candidate 004:** prefill >=500 tokens/s, measured 513.602 (margin 13.602, 2.72%); decode >=50 tokens/s, measured 53.641 (margin 3.641, 7.28%). All three formal repetitions individually exceed both targets.
+- **Passed:** complete 61-check conformance run, 60 passed/one advisory skipped, negative control verified; all six workload requests and all three formal passes succeeded; requests reconciled.
+- **Not applicable as numeric gates:** additional footprint/swap caps, declared inapplicable before freeze. Default Metal/OS limits remained unchanged and resource observations are disclosed.
+- **Not in scope / not claimed:** numerical equivalence, HumanEval quality, larger context/performance workloads, vision/MTP, speculation, exhaustive SOTA coverage, autonomy, recursive improvement or self-hosting.
+
+MLX-LM has the highest prefill and decode rates among these tested configurations, but its affine8/BF16 path is not the candidate's official FP8/FP32 treatment. No controlled engine speedup is computed. Three repetitions characterize one local cohort only; they do not establish cross-day thermal or reliability stability. The implementation PR is open and unmerged. Results are submitted as a separate LLM Bootstrap PR; publication does not adopt the implementation or authorize merging either change. The user explicitly requested completion and report submission; no additional publication authorization was inferred from a skill refresh.
 
 ## Feedback for future experiments
 
-Reviewed text only. Refer to private artifacts by hash and access limitation; do not paste transcripts, weights, credentials, or private prompts. A suggestion here becomes a change only through a separate pull request.
-
-- Failures, interruptions, and their causes: Earlier planning under revision 744d5caa2545852f9c43d82863e059a24d78344f was blocked by missing released performance evaluation and mandatory numerical-equivalence checks. Upstream revision 9b71eb126c862a8c185272e5b68a26a55e953cb9 resolves these: engine-throughput and humaneval-20-pi are released, and numerical equivalence is no longer required. No measured failure or success is inferred from this update.
-- Preflight checks that would have caught them earlier: Resolve and pin the intended repository version, inspect released evaluation definitions, verify script hashes, and check protocol/schema consistency before freezing.
-- Recurring human interventions and what would have avoided them: The user requested a skill refresh after clarifying goals. Automatically collect discoverable technical metadata to reduce intake burden.
-- Suggested changes to skills or evaluations (cite the run and evidence hash): The previous numerical-equivalence/evaluation-release feedback is resolved upstream. The same 0.1.0 manifest version now represents different source commits; retain the full source SHA and installed-file verification for treatment identity. No formal run exists.
-- Calibration notes for baselines, budgets, and thresholds (priors only; each contract fixes its own before tuning): Not obtained; no formal run has occurred.
-- Limits on generalizing: preliminary cohorts, unmatched comparisons, hardware-specific effects: No model or benchmark has run. Installation, metadata hashes, and schema checks are not engine results.
-
-## Skill update validation
-
-Local-only `evidence/skill-update.json` SHA-256: `2662bf6585546e5804be82c292f3c190cf4bf00b10c17a330e56dcb339a53f5b`. The previous draft contract and report are preserved as hashed local-only evidence. The contract remains a draft; no freeze gate was bypassed.
-
-Validation log `installed-check-skill-update.txt` SHA-256: `ab6f4601abed36aa97fbfdc0d0bf9ff37c16aa2db6cc35921700957619035979`.
-
-Validation log `schema-check-skill-update.txt` SHA-256: `77515f0715ba6787a4bfa04aa3b3cf6bd86b0e50400000a0795d8e1b8b389d35`.
-
-## Contract freeze and baseline preflight
-
-The contract was completed and frozen at `2026-10-29T14:48:23-07:00`, before writing candidate engine code. The candidate workspace is the empty source revision `5fe496f89f7bd68eeb6ffc2f2f2efef375771c5e`. The baseline protocol adapter is independent baseline preparation and will not be reused by the candidate.
-
-Baseline preflight used MLX-LM with affine8/group64 weights and BF16 defaults, while the candidate is official FP8 with FP32 math/state. This is a disclosed best-permitted-configuration comparison; no matched-precision speedup is claimed. Complete conformance had 60 pass, one skip, zero fail/error, and a verified negative control. The one-pass pre-freeze throughput preflight passed both selected workloads, with prefill 1770.88 tokens/s and decode 55.04 tokens/s. These are baseline preliminary setup observations, not candidate or formal three-repetition results.
-
-- Local-only preflight evidence `conformance-attempt-001.json`: SHA-256 `23477b65c7b5431829920f49ee6614f7e794c61c3c0b797d7f2999ff9bf7d4d1`.
-- Local-only preflight evidence `throughput-attempt-001.json`: SHA-256 `f14ce51769ceddb6dc3d4c754e806e407001a89a026b1b89388b97f0c0d61946`.
-- Local-only preflight evidence `throughput-attempt-001.requests.evidence`: SHA-256 `5518e59e06c7c9b1ea1e8ea887b4db5ac9584b76883fe92c05f2f79831f0eed7`.
-- Local-only preflight evidence `baseline-runtime-identity.json`: SHA-256 `626749b727a0540e8d8015c31c910370814cdc41080fef2c34791f708a1d051e`.
-
-Remaining work: implement the .NET + Metal candidate; run baseline/candidate formal evaluations serially using this frozen contract; preserve all attempts; report every acceptance criterion and submit reviewed result records in a separate PR.
-
-## Formal baseline result
-
-Frozen contract commit: `5f7f7099be4a7c261140d6fbc4f800d7065266e1`. Run `2026-10-29-baseline-001` completed after the freeze, with complete API conformance (60 pass, one skip, no fail/error) and one throughput warm-up plus three successful formal passes. Prefill: **1723.22 tokens/s**. Decode: **54.76 tokens/s**. All six workload requests passed their gates. These are independent baseline measurements, not candidate results.
-
-The sampled CPU resident footprint was 0.102 GiB, with the evaluator explicitly noting that GPU memory may be excluded; total GPU/model footprint was not obtained. Whole-machine observed swap-out delta during formal passes was 0 bytes. No competing engine process was run during the baseline measurement; general GUI GPU exclusivity is not claimed. The owned baseline server and adapter were stopped after measurement to release GPU resources before candidate development tests.
-
-## Candidate implementation milestone
-
-Candidate source revision `6c4906c40578eb36280dbf6c5a0fc408045be279` implements the original .NET + Metal full 40-layer inference path. Development checks passed 264 FP8/projection cases and six independent tokenizer/chat-template fixtures. The first real official-FP8 smoke produced `Hello!`, token IDs `[9419, 0, 248046]`, after a 19-token prompt; Metal buffer allocation was 36,846,419,968 bytes. This is a development smoke only. HTTP conformance, formal candidate throughput and application quality are not yet established. No existing inference backend is used in the candidate.
-
-Local-only milestone evidence `candidate-initial-smoke.json`: SHA-256 `48ed2c97d1ee4222d734eab1a4322d319a06efa043591d2c3857950e77be711f`.
-
-## Candidate API conformance
-
-Candidate source `07b41c5014426e6716c8ee2c6b2856c7f7d62a62` passed the complete repository-owned conformance evaluation: 60 passed, one skipped, zero failed/errored, with a verified negative control. The skipped incremental-delivery advisory had too few completion tokens to judge; it is not claimed as a pass. This covers all three API families, tool calls, UTF-8/reasoning separation, input errors, concurrency, cancellation/recovery, prefix consistency, and context overflow/recovery according to the pinned evaluator. Throughput run `2026-10-29-candidate-001` is in progress; no performance result is available yet.
-
-Local-only conformance result SHA-256: `02834a3d156b52484bcf5ce3a524ab0d17633d1470c4b8f0c0e3e4c09f3f8a35`.
-
-## Initial candidate formal result (targets failed)
-
-Run `2026-10-29-candidate-001`, source `07b41c5014426e6716c8ee2c6b2856c7f7d62a62`, completed one warm-up and three formal passes, all six requests passing their workload gates. Complete API conformance had passed first. Prefill: **22.337 tokens/s** versus target 500 (**failed**). Decode: **21.037 tokens/s** versus target 50 (**failed**). This unfavorable result is preserved unchanged. The initial implementation prefills one token at a time and uses scalar FP8 weight reads; the next planned implementation groups prefill by layer/token blocks and vectorizes packed FP8 reads, retaining FP32 math/state and the same weights/workloads.
-
-Source for future optimization was edited while the old immutable runtime was measured; no rebuild or competing GPU inference ran during the formal passes. The initial build preceded its source commit, so autogenerated DLL metadata cites the preceding 6c4906c source label; the actual runtime source content matches 07b41c5 and all deployed artifacts are hashed. Later runtimes will commit source before build. No thermal stability or general machine exclusivity is claimed.
+- Preserve unfavorable attempts: candidate 001 missed both targets (22.337/21.037), candidate 002 still missed both (316.216/29.187), and candidate 003 passed decode but missed prefill. Candidate 004 passed both after wider FP32 tiles; the report does not discard earlier outcomes. Layer-wise prefill addressed sequential per-token weight traffic; kernel diagnostics exposed expensive serial routing. Serialized diagnostic submission changes scheduling and is excluded from formal results. Later candidates must rerun complete conformance before throughput.
+- Early build issues included shader assets not copied to output, an unavailable Metal `log1p` intrinsic, and chat-template thinking markers incorrectly treated as ordinary BPE text. Fixes were copying assets, stable FP32 softplus, and explicit added-token insertion in template construction while keeping user control-token literals ordinary text. A runtime-compile smoke plus reference tokenizer/template fixtures would have caught these sooner. No evaluator was weakened.
+- Commit source before building, verify embedded version and hash the actual loaded DLL/native bridge/copied shader. A checkout SHA alone does not identify deployed code; candidate 001 demonstrates the metadata ambiguity.
+- Upstream skill refresh resolved earlier planning blockers: a released throughput evaluation is available and numerical equivalence is no longer mandatory. Full source SHA and file hashes must identify a treatment even when the plugin manifest version stays 0.1.0. Local refreshes should not silently amend an already frozen treatment.
+- Intake should collect discoverable model/hardware/toolchain metadata before asking users. Distinguish required contract choices from optional research additions; no numerical-equivalence suite or HumanEval requirement was invented after freeze. A revision identifies code but reproduction also needs immutable model files, actual artifacts, commands/settings and raw-evidence access limitations.
+- Suggested separate maintainer changes: make candidate-native versus RSS memory coverage prominent; clarify that throughput `quality.application` counts workload gates, not semantic correctness; provide a lightweight original-engine build/runtime identity checklist. These suggestions change neither the frozen evaluation nor skills in this experiment.
+- The user chose 500/50 as planned thresholds without calibration. Decode was achievable after a small routing change; prefill required wider FP32 matrix tiling and memory reuse. The successful cohort has only a 2.72% prefill margin; no cross-day stability claim follows. Future contracts should use dated hardware/precision evidence to calibrate priors while freezing their own targets before tuning. Affine8/BF16 baseline results cannot predict matched FP8/FP32 performance. Generalization beyond this model/device/two-workload cohort is unproven.

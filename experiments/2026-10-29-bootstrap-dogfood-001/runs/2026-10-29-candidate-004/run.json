@@ -1,0 +1,71 @@
+{
+  "run_id": "2026-10-29-candidate-004",
+  "status": "completed",
+  "acceptance": "passed",
+  "contract": {
+    "path": "experiments/2026-10-29-bootstrap-dogfood-001/contract.json",
+    "revision": "5f7f7099be4a7c261140d6fbc4f800d7065266e1",
+    "sha256": "bbe28f083c4afd6a8593a12dbfb73877e3c605889ab9809dd91d4cbd7ce08adf"
+  },
+  "skills_revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
+  "started_at": "2026-10-29T22:55:48+00:00",
+  "ended_at": "2026-10-29T22:57:28.566755+00:00",
+  "evaluation_results": [
+    {
+      "role": "candidate",
+      "engine_name": "bootstrap-dotnet-metal-fp8-wide-tiles",
+      "path": "experiments/2026-10-29-bootstrap-dogfood-001/runs/2026-10-29-candidate-004/candidate-bootstrap-dotnet-metal-fp8.json",
+      "sha256": "26cc4331abc981b88e88f265df5822472d19832d43001dc3b45f50c5ab354386"
+    }
+  ],
+  "comparisons": [],
+  "claims": [],
+  "human_interventions": {
+    "unavailable": true,
+    "reason": "User task-setup choices are summarized in the report; exact original message timestamps are not exposed. No human implementation edits occurred during this candidate run."
+  },
+  "cost": {
+    "builder_tokens": {
+      "unavailable": true,
+      "reason": "Per-run builder token accounting was not exposed."
+    },
+    "elapsed_hours": {
+      "unavailable": true,
+      "reason": "No independent whole-run monotonic observer; evaluator request durations are preserved."
+    },
+    "hardware_hours": {
+      "unavailable": true,
+      "reason": "Separate GPU hardware-hour accounting was not instrumented."
+    }
+  },
+  "self_hosting": {
+    "status": "not-in-scope"
+  },
+  "evidence": [
+    {
+      "description": "Complete API conformance: 60 passed, one incremental-delivery advisory skipped, zero failed/errored, verified negative control.",
+      "access": "local-only",
+      "sha256": "d014b817054e70fdb719e192ac40c05cee65d12c6ae4c4a44278f4e38630c477",
+      "access_limitation": "Ignored local experiment evidence."
+    },
+    {
+      "description": "Per-request timings, token counts, and gate outcomes; it holds no prompts or model output",
+      "access": "local-only",
+      "sha256": "586f06bd363595b421d70fc1030e26285538be1bdd54e5c7fad7365c44ca25e6",
+      "access_limitation": "Kept next to the result document and not committed to the repository."
+    },
+    {
+      "description": "Deployed DLL, native bridge, shader hashes and source revision; commit before build with aligned embedded assembly version.",
+      "access": "local-only",
+      "sha256": "92e74d7de392ff070932b2772759f0b478174598c0e7b7cc082f8f71849ab931",
+      "access_limitation": "Ignored local artifact identity record."
+    },
+    {
+      "description": "Real-model batched/sequential generated-token agreement across a 512-token prefill boundary on the 626-token public fixture.",
+      "access": "local-only",
+      "sha256": "8b00714ee370221f9cc609d5005be667a81672ac1b982c3e7b91ecf4031ed73b",
+      "access_limitation": "Ignored local implementation check, not numerical-equivalence or semantic-quality evidence."
+    }
+  ],
+  "interpretation": "Frozen acceptance passed: prefill 513.602 >=500 tokens/s and decode 53.641 >=50 tokens/s. All three formal repetitions and all six workload requests passed after complete API conformance (60 passed, one advisory skipped, negative control verified). Runtime 5d672cbc77829692d7d1eb3957970b8ec6cb83b1 uses wider FP32 dense/expert tiles and vectorized packed-weight staging with unchanged official FP8 weights and FP32 compute/state. Profiler disabled. Preserve prior candidates 001-003, which missed one or both targets. This is one local cohort and two selected fixed-shape workloads; no numerical-equivalence, HumanEval, SOTA or self-hosting claim."
+}
