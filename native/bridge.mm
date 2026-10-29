@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <string>
 #include <unordered_map>
+#include <cstdlib>
 
 // Original platform-only interop. All model operators are in kernels.metal.
 struct Context {
@@ -16,6 +17,8 @@ struct Context {
     id<MTLComputeCommandEncoder> encoder;
     std::unordered_map<std::string,id<MTLComputePipelineState>> pipelines;
     std::string error;
+    bool profile=false;
+    std::unordered_map<std::string,std::pair<double,uint64_t>> timings;
 };
 struct Buffer {
     id<MTLBuffer> value;
@@ -27,6 +30,7 @@ extern "C" {
 void *boot_create(const char *source) { @autoreleasepool {
     Context *c=new Context(); c->device=MTLCreateSystemDefaultDevice();
     if(!c->device){delete c;return nullptr;}
+    c->profile=getenv("BOOTSTRAP_PROFILE")!=nullptr;
     c->queue=[c->device newCommandQueue]; NSError *error=nil;
     MTLCompileOptions *options=[MTLCompileOptions new]; options.mathMode=MTLMathModeSafe;
     c->library=[c->device newLibraryWithSource:[NSString stringWithUTF8String:source] options:options error:&error];
@@ -34,7 +38,11 @@ void *boot_create(const char *source) { @autoreleasepool {
     return c;
 }}
 const char *boot_error(void *handle) { return ((Context*)handle)->error.c_str(); }
-void boot_destroy(void *handle) { delete (Context*)handle; }
+void boot_destroy(void *handle) {
+    Context *c=(Context*)handle;
+    if(c->profile)for(auto &entry:c->timings)fprintf(stderr,"GPU_DIAGNOSTIC %s count=%llu gpu_ms=%.6f\n",entry.first.c_str(),(unsigned long long)entry.second.second,entry.second.first*1000);
+    delete c;
+}
 void *boot_buffer(void *handle,uint64_t bytes) { @autoreleasepool {
     Context *c=(Context*)handle; Buffer *b=new Buffer();
     b->value=[c->device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
@@ -81,7 +89,15 @@ int boot_dispatch(void *handle,const char *name,void **buffers,const uint64_t *o
     [c->encoder setComputePipelineState:pipeline];
     for(int i=0;i<count;++i){Buffer *b=(Buffer*)buffers[i];[c->encoder setBuffer:b->value offset:offsets[i] atIndex:i];}
     [c->encoder setBytes:parameters length:parameter_bytes atIndex:15];
-    [c->encoder dispatchThreads:MTLSizeMake(x,y,z) threadsPerThreadgroup:MTLSizeMake(tx,ty,tz)];return 1;
+    [c->encoder dispatchThreads:MTLSizeMake(x,y,z) threadsPerThreadgroup:MTLSizeMake(tx,ty,tz)];
+    // Opt-in diagnostic mode serializes submissions and is never used for formal timing.
+    if(c->profile){
+        [c->encoder endEncoding];c->encoder=nil;[c->command commit];[c->command waitUntilCompleted];
+        if(c->command.status!=MTLCommandBufferStatusCompleted){c->error=c->command.error.description.UTF8String;return 0;}
+        auto &sample=c->timings[name];sample.first+=c->command.GPUEndTime-c->command.GPUStartTime;sample.second++;
+        c->command=[c->queue commandBuffer];
+    }
+    return 1;
 }}
 int boot_end(void *handle) { @autoreleasepool {
     Context *c=(Context*)handle;
