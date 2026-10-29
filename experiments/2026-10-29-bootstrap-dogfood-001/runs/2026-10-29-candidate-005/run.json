@@ -1,0 +1,71 @@
+{
+  "run_id": "2026-10-29-candidate-005",
+  "status": "completed",
+  "acceptance": "passed",
+  "contract": {
+    "path": "experiments/2026-10-29-bootstrap-dogfood-001/contract.json",
+    "revision": "5f7f7099be4a7c261140d6fbc4f800d7065266e1",
+    "sha256": "bbe28f083c4afd6a8593a12dbfb73877e3c605889ab9809dd91d4cbd7ce08adf"
+  },
+  "skills_revision": "9b71eb126c862a8c185272e5b68a26a55e953cb9",
+  "started_at": "2026-10-29T23:01:47+00:00",
+  "ended_at": "2026-10-29T23:03:29.578774+00:00",
+  "evaluation_results": [
+    {
+      "role": "candidate",
+      "engine_name": "bootstrap-dotnet-metal-fp8-final",
+      "path": "experiments/2026-10-29-bootstrap-dogfood-001/runs/2026-10-29-candidate-005/candidate-bootstrap-dotnet-metal-fp8.json",
+      "sha256": "4d4a870e8892a587c752bade47eba0c275ad6cd4ea1a18d40903efebbd883ae1"
+    }
+  ],
+  "comparisons": [],
+  "claims": [],
+  "human_interventions": {
+    "unavailable": true,
+    "reason": "User task-setup choices are summarized in the report; exact original message timestamps are not exposed. No human implementation edits occurred during this candidate run."
+  },
+  "cost": {
+    "builder_tokens": {
+      "unavailable": true,
+      "reason": "Per-run builder token accounting was not exposed."
+    },
+    "elapsed_hours": {
+      "unavailable": true,
+      "reason": "No independent whole-run monotonic observer; evaluator request durations are preserved."
+    },
+    "hardware_hours": {
+      "unavailable": true,
+      "reason": "Separate GPU hardware-hour accounting was not instrumented."
+    }
+  },
+  "self_hosting": {
+    "status": "not-in-scope"
+  },
+  "evidence": [
+    {
+      "description": "Complete API conformance: 60 passed, one incremental-delivery advisory skipped, zero failed/errored, verified negative control.",
+      "access": "local-only",
+      "sha256": "12a583a522b18d8d16f6b247e3303ef761a52f9146555b8ef067c5679fb31fb6",
+      "access_limitation": "Ignored local experiment evidence."
+    },
+    {
+      "description": "Per-request timings, token counts, and gate outcomes; it holds no prompts or model output",
+      "access": "local-only",
+      "sha256": "436368fb088215dc7cac3cb74d46764457bca20590cfd2d6b5bbb3cf45b4e339",
+      "access_limitation": "Kept next to the result document and not committed to the repository."
+    },
+    {
+      "description": "Deployed DLL, native bridge, shader hashes and source revision; commit before build with aligned embedded assembly version.",
+      "access": "local-only",
+      "sha256": "f4ee6258057e897109cf27f8a383dccb98b0bd265abb22ba3d57c220f0e24e68",
+      "access_limitation": "Ignored local artifact identity record."
+    },
+    {
+      "description": "Six reference tokenizer fixtures and seven user-literal preservation checks passed after limiting historical thinking-tag stripping to assistant messages. Native bridge/shader hashes unchanged from candidate 004; its 1112 kernel checks and 626-token continuity check remain applicable.",
+      "access": "local-only",
+      "sha256": "f4ee6258057e897109cf27f8a383dccb98b0bd265abb22ba3d57c220f0e24e68",
+      "access_limitation": "Ignored local build/check identity record. The canonical checkpoint template was inspected; no evaluator was modified."
+    }
+  ],
+  "interpretation": "Final frozen acceptance passed: prefill 516.571 >=500 tokens/s, decode 53.575 >=50 tokens/s, all three formal passes/six requests successful and reconciled after complete API conformance (60 pass, one advisory skip, verified negative control). Source/runtime f51d0ac885758e3b1735a7549e3a35497d472f1b fixes a host-only user-literal thinking-tag handling bug discovered in final audit. Native bridge and FP32 Metal shader hashes match candidate 004; official FP8 storage/state precisions, workload, warmup/repetitions and OS limits are unchanged. Preserve every prior result. No semantic-quality, numerical-equivalence, SOTA or self-hosting claim."
+}
