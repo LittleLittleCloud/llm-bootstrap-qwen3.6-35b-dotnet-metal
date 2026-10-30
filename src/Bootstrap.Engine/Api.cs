@@ -20,7 +20,7 @@ internal static class Api
                 {
                     var body = await JsonNode.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted) as JsonObject ?? throw new ArgumentException("Expected a JSON object");
                     var input = ChatParsing.Parse(body, api); int[] prompt = ChatFormatting.Format(engine.Tokenizer, input);
-                    if (prompt.Length + input.Maximum > engine.ContextWindow) throw new ArgumentException("Context window exceeded");
+                    input = input with { Maximum = ContextLimits.OutputBudget(prompt.Length, input.Maximum, engine.ContextWindow) };
                     await serial.WaitAsync(context.RequestAborted); acquired = true;
                     var writer = new ApiWriter(context, input, body, prompt.Length);
                     await writer.Start();

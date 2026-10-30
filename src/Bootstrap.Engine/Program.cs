@@ -22,14 +22,15 @@ if (command is "generate" or "serve" or "compare-prefill" or "context-self-test"
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
         if (command == "context-self-test")
         {
-            string fixture = string.Concat(Enumerable.Repeat("This sentence is harmless context. ", 700)) + "Reply with only the number: what is 2 + 2?";
+            int repeats = int.Parse(Option("--fixture-repeats") ?? "700");
+            string fixture = string.Concat(Enumerable.Repeat("This sentence is harmless context. ", repeats)) + "Reply with only the number: what is 2 + 2?";
             var tokens = engine.Tokenizer.SimpleChat(fixture);
             if (tokens.Length <= 4096 || tokens.Length + 8 > engine.ContextWindow) throw new Exception("Context fixture needs a configured window larger than 4096");
             var generated = engine.Generate(tokens, 8, false);
             if (generated.Text.Trim() != "4") throw new Exception("Long-context arithmetic smoke did not produce expected public-fixture answer");
             try { engine.Generate(new int[engine.ContextWindow], 1, false); throw new Exception("Context overflow was accepted"); }
             catch (ArgumentException) { }
-            Console.WriteLine(JsonSerializer.Serialize(new { context_window = engine.ContextWindow, prompt_tokens = tokens.Length, generated = generated.Tokens, text = generated.Text, overflow_rejected = true, metal_buffer_bytes = engine.AllocatedBytes }));
+            Console.WriteLine(JsonSerializer.Serialize(new { context_window = engine.ContextWindow, cache_capacity = engine.CacheCapacity, prompt_tokens = tokens.Length, generated = generated.Tokens, text = generated.Text, overflow_rejected = true, metal_buffer_bytes = engine.AllocatedBytes }));
             return;
         }
         if (command == "compare-prefill")
@@ -47,7 +48,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "context-self-test"
         var prompt = Option("--prompt") ?? "Say hello in one short sentence.";
         var inputTokens = engine.Tokenizer.SimpleChat(prompt);
         Console.Error.WriteLine($"Model ready; {engine.AllocatedBytes} Metal buffer bytes; {inputTokens.Length} prompt tokens");
-        var result = engine.Generate(inputTokens, int.Parse(Option("--max-tokens") ?? "32"), args.Contains("--ignore-eos"), piece => { Console.Error.Write(piece); return true; });
+        var result = engine.Generate(inputTokens, int.Parse(Option("--max-tokens") ?? int.MaxValue.ToString()), args.Contains("--ignore-eos"), piece => { Console.Error.Write(piece); return true; });
         Console.Error.WriteLine(); Console.WriteLine(JsonSerializer.Serialize(result));
     }
     else
@@ -148,7 +149,7 @@ if (command == "kernel-self-test")
             checks += 2;
         }
     }
-    const int longContext = 32768, queryTokens = 2;
+    const int longContext = ContextLimits.NativeWindow, queryTokens = 2;
     using var longQ = device.Allocate(queryTokens * 4096 * 4); using var longK = device.Allocate((ulong)longContext * 512 * 4); using var longScores = device.Allocate((ulong)queryTokens * 16 * longContext * 4);
     for (int i = 0; i < queryTokens * 4096; i++) longQ.Values<float>(queryTokens * 4096)[i] = (i % 19 - 9) / 32f;
     for (int i = 0; i < longContext * 512; i++) longK.Values<float>(longContext * 512)[i] = (i % 31 - 15) / 32f;
@@ -165,12 +166,20 @@ if (command == "kernel-self-test")
         }
         checks++;
     }
-    foreach (int valid in new[] { 512, 4096, 8192, 32768 }) { if (QwenEngine.ValidateContextWindow(valid) != valid) throw new Exception("Valid context rejected"); checks++; }
-    foreach (int invalid in new[] { -1, 0, 511, 32769, int.MaxValue })
+    foreach (int valid in new[] { 1, 512, 4096, 8192, 32768, 32769, ContextLimits.NativeWindow }) { if (QwenEngine.ValidateContextWindow(valid) != valid) throw new Exception("Valid context rejected"); checks++; }
+    foreach (int invalid in new[] { -1, 0, ContextLimits.NativeWindow + 1, int.MaxValue })
     {
         try { QwenEngine.ValidateContextWindow(invalid); throw new Exception("Invalid context accepted"); }
         catch (ArgumentOutOfRangeException) { checks++; }
     }
+    foreach (int position in new[] { 0, 4090, 32760, 65530, ContextLimits.NativeWindow - 513 })
+    {
+        int count = ContextLimits.PrefillCount(position, 512);
+        if (count < 1 || count > 512 || (long)count * 16 * (position + count) > ContextLimits.AttentionWorkspaceFloats) throw new Exception("Attention workspace budget exceeded");
+        checks++;
+    }
+    if (ContextLimits.OutputBudget(10, 65536, ContextLimits.NativeWindow) != 65536 || ContextLimits.OutputBudget(10, int.MaxValue, 32768) != 32758 || ContextLimits.OutputBudget(32767, 99999, 32768) != 1) throw new Exception("Output budget clamping mismatch");
+    checks += 3;
     Console.WriteLine(JsonSerializer.Serialize(new { passed = checks, allocated_bytes = device.AllocatedBytes, native_model_backend = "original Metal kernels" }));
     return;
 }
