@@ -51,6 +51,10 @@ and chat-template hashes before serving. The SDK is pinned in `global.json`.
 dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll serve --model-dir /path/to/snapshot --port 17863
 ```
 
+`serve` listens on all IPv4/IPv6 interfaces and accepts any HTTP Host name.
+Browser CORS permits every origin, method and request header, including OPTIONS
+preflight for streaming requests. The endpoint has no authentication requirement.
+
 The original Kestrel server provides the selected experiment behavior through
 `/v1/models`, `/v1/chat/completions`, `/v1/responses` and `/v1/messages`, including
 streaming and generic model-generated tool calls. It serializes inference and
