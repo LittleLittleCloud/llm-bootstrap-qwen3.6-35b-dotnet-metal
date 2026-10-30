@@ -1,11 +1,13 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 
 namespace Bootstrap.Engine;
 
-internal sealed record FunctionCall(string Id, string Name, JsonObject Arguments);
+internal sealed record FunctionCall(string Id, string Name, JsonObject Arguments, string? WireArguments = null)
+{
+    public string JsonArguments => WireArguments ?? Arguments.ToJsonString();
+}
 internal sealed record ChatMessage(string Role, string Text, IReadOnlyList<FunctionCall>? Calls = null);
 internal sealed record ChatInput(string Api, List<ChatMessage> Messages, JsonArray Tools, int Maximum, bool Stream, bool IgnoreEos, string[] Stops, bool ForceTool, bool JsonObject);
 
@@ -98,40 +100,6 @@ internal static class ChatParsing
         string[] stops = stop is JsonArray list ? list.Select(s => s!.GetValue<string>()).ToArray() : stop is JsonValue ? [stop.GetValue<string>()] : [];
         if (stops.Any(s => s.Length == 0)) throw new ArgumentException("Stop strings cannot be empty");
         return new(api, messages, tools, maximum, body["stream"]?.GetValue<bool>() ?? false, body["ignore_eos"]?.GetValue<bool>() ?? false, stops, force, body["response_format"]?["type"]?.GetValue<string>() == "json_object");
-    }
-    static readonly Regex Functions = new(@"<function=([^>]+)>(.*?)</function>", RegexOptions.Singleline | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
-    static readonly Regex Parameters = new(@"<parameter=([^>]+)>(.*?)</parameter>", RegexOptions.Singleline | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
-    public static (string Text, List<FunctionCall> Calls) ParseOutput(string text, JsonArray tools)
-    {
-        var calls = new List<FunctionCall>();
-        foreach (Match function in Functions.Matches(text))
-        {
-            string name = function.Groups[1].Value.Trim();
-            var definition = tools.FirstOrDefault(t => t?["function"]?["name"]?.GetValue<string>() == name)?["function"];
-            if (definition is null) continue;
-            var parameters = new JsonObject();
-            foreach (Match parameter in Parameters.Matches(function.Groups[2].Value))
-            {
-                string key = parameter.Groups[1].Value.Trim(), value = parameter.Groups[2].Value.Trim();
-                string? type = definition["parameters"]?["properties"]?[key]?["type"]?.GetValue<string>();
-                parameters[key] = type switch
-                {
-                    "integer" => JsonValue.Create(long.Parse(value, System.Globalization.CultureInfo.InvariantCulture)),
-                    "number" => JsonValue.Create(double.Parse(value, System.Globalization.CultureInfo.InvariantCulture)),
-                    "boolean" => JsonValue.Create(bool.Parse(value)),
-                    "object" or "array" => JsonNode.Parse(value),
-                    _ => JsonValue.Create(value)
-                };
-            }
-            calls.Add(new("call_" + Guid.NewGuid().ToString("N"), name, parameters));
-        }
-        if (calls.Count > 0)
-        {
-            int start = text.IndexOf("<tool_call>", StringComparison.Ordinal);
-            if (start < 0) start = text.IndexOf("<function=", StringComparison.Ordinal);
-            text = text[..start].Trim();
-        }
-        return (text, calls);
     }
 }
 

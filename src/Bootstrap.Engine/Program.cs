@@ -11,6 +11,7 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
+if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
 if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
