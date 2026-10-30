@@ -7,14 +7,17 @@ namespace Bootstrap.Engine;
 internal sealed partial class QwenEngine : IDisposable
 {
     const int Hidden = 2048, Vocabulary = 248320;
-    public const int DefaultContextWindow = 4096, MaximumContextWindow = 32768;
+    public const int DefaultContextWindow = ContextLimits.NativeWindow, MaximumContextWindow = ContextLimits.NativeWindow;
     readonly int Context;
+    int cacheCapacity;
+    GpuBuffer scores;
     public int ContextWindow => Context;
-    public static int ValidateContextWindow(int contextWindow) => contextWindow is >= 512 and <= MaximumContextWindow ? contextWindow : throw new ArgumentOutOfRangeException(nameof(contextWindow), "Context window must be between 512 and 32768 tokens");
+    public int CacheCapacity => cacheCapacity;
+    public static int ValidateContextWindow(int contextWindow) => contextWindow is >= 1 and <= MaximumContextWindow ? contextWindow : throw new ArgumentOutOfRangeException(nameof(contextWindow), "Context window must fit the model's native 262144-token window");
     readonly Metal gpu;
     readonly Checkpoint weights;
     readonly List<GpuBuffer> owned = new();
-    readonly GpuBuffer x, norm, attention, projection, qkv, z, a, b, conv, q, k, rotated, qgate, v, scores, router, ids, rates, expertActivation, expertOutput, sharedGate, sharedUp, sharedActivation, sharedOutput, sharedWeight, logits, next, dummy;
+    readonly GpuBuffer x, norm, attention, projection, qkv, z, a, b, conv, q, k, rotated, qgate, v, router, ids, rates, expertActivation, expertOutput, sharedGate, sharedUp, sharedActivation, sharedOutput, sharedWeight, logits, next, dummy;
     readonly GpuBuffer[] state = new GpuBuffer[40], convolution = new GpuBuffer[40], keyCache = new GpuBuffer[40], valueCache = new GpuBuffer[40], descriptors = new GpuBuffer[40];
     public ByteBpe Tokenizer { get; }
     public ulong AllocatedBytes => gpu.AllocatedBytes;
@@ -23,19 +26,21 @@ internal sealed partial class QwenEngine : IDisposable
     public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow)
     {
         Context = ValidateContextWindow(contextWindow);
+        cacheCapacity = Math.Min(Context, 4096);
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         Tokenizer = new ByteBpe(Path.Combine(directory, "tokenizer.json"), manifest.RootElement.GetProperty("tokenizer_sha256").GetString()!);
         if (Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, "chat_template.jinja")))) != manifest.RootElement.GetProperty("chat_template_sha256").GetString()) throw new InvalidDataException("Chat-template hash mismatch");
         using var config = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(directory, "config.json")));
         var geometry = config.RootElement.GetProperty("text_config");
+        if (Context > geometry.GetProperty("max_position_embeddings").GetInt32()) throw new NotSupportedException("Configured context exceeds the checkpoint's native context");
         if (geometry.GetProperty("hidden_size").GetInt32() != Hidden || geometry.GetProperty("num_hidden_layers").GetInt32() != 40 || geometry.GetProperty("num_experts").GetInt32() != 256 || geometry.GetProperty("num_experts_per_tok").GetInt32() != 8 || geometry.GetProperty("vocab_size").GetInt32() != Vocabulary) throw new NotSupportedException("Unexpected model geometry");
         gpu = new Metal(File.ReadAllText(kernelPath));
         weights = new Checkpoint(gpu, directory, manifestPath);
-        x = Buffer(Hidden); norm = Buffer(Hidden); attention = Buffer(4096); projection = Buffer(Hidden); qkv = Buffer(8192); z = Buffer(4096); a = Buffer(32); b = Buffer(32); conv = Buffer(8192); q = Buffer(4096); k = Buffer(512 * 4); rotated = Buffer(4096); qgate = Buffer(4096); v = Buffer(512); scores = Buffer(16 * Context); router = Buffer(256); ids = Buffer(8); rates = Buffer(8); expertActivation = Buffer(8 * 512); expertOutput = Buffer(8 * Hidden); sharedGate = Buffer(512); sharedUp = Buffer(512); sharedActivation = Buffer(512); sharedOutput = Buffer(Hidden); sharedWeight = Buffer(1); logits = Buffer(Vocabulary); next = Buffer(1); dummy = Buffer(1);
+        x = Buffer(Hidden); norm = Buffer(Hidden); attention = Buffer(4096); projection = Buffer(Hidden); qkv = Buffer(8192); z = Buffer(4096); a = Buffer(32); b = Buffer(32); conv = Buffer(8192); q = Buffer(4096); k = Buffer(512 * 4); rotated = Buffer(4096); qgate = Buffer(4096); v = Buffer(512); scores = Buffer(16 * cacheCapacity); router = Buffer(256); ids = Buffer(8); rates = Buffer(8); expertActivation = Buffer(8 * 512); expertOutput = Buffer(8 * Hidden); sharedGate = Buffer(512); sharedUp = Buffer(512); sharedActivation = Buffer(512); sharedOutput = Buffer(Hidden); sharedWeight = Buffer(1); logits = Buffer(Vocabulary); next = Buffer(1); dummy = Buffer(1);
         for (int layer = 0; layer < 40; layer++)
         {
             if ((layer + 1) % 4 != 0) { state[layer] = Buffer(32 * 128 * 128); convolution[layer] = Buffer(3 * 8192); }
-            else { keyCache[layer] = Buffer(Context * 512); valueCache[layer] = Buffer(Context * 512); }
+            else { keyCache[layer] = Buffer(cacheCapacity * 512); valueCache[layer] = Buffer(cacheCapacity * 512); }
             descriptors[layer] = Buffer(256 * 6 * 2);
             var table = descriptors[layer].Values<ulong>(256 * 6);
             string prefix = Prefix(layer) + ".mlp.experts.";
@@ -48,6 +53,29 @@ internal sealed partial class QwenEngine : IDisposable
                 table[e * 6 + 4] = down.Offset; table[e * 6 + 5] = weights[prefix + e + ".down_proj.weight_scale_inv"].Offset;
             }
         }
+    }
+    void Grow(ref GpuBuffer buffer, int floats)
+    {
+        if ((ulong)floats * sizeof(float) <= buffer.Length) return;
+        var replacement = Buffer(floats);
+        buffer.Values<float>(checked((int)(buffer.Length / sizeof(float)))).CopyTo(replacement.Values<float>(floats));
+        owned.Remove(buffer); buffer.Dispose(); buffer = replacement;
+    }
+    void EnsureCacheCapacity(int required)
+    {
+        if (required <= cacheCapacity) return;
+        if (required > Context) throw new ArgumentOutOfRangeException(nameof(required));
+        int capacity = cacheCapacity;
+        while (capacity < required) capacity = Math.Min(Context, checked(capacity * 2));
+        // No command is active here. Preserve all existing KV positions during decode/prefill growth.
+        for (int layer = 3; layer < 40; layer += 4)
+        {
+            Grow(ref keyCache[layer], checked(capacity * 512));
+            Grow(ref valueCache[layer], checked(capacity * 512));
+        }
+        Grow(ref scores, checked(capacity * 16));
+        cacheCapacity = capacity;
+        Console.Error.WriteLine($"KV capacity grew to {capacity} tokens; Metal buffer bytes={AllocatedBytes}");
     }
     static string Prefix(int layer) => "model.language_model.layers." + layer;
     void Project(string name, GpuBuffer input, GpuBuffer output)
@@ -74,7 +102,8 @@ internal sealed partial class QwenEngine : IDisposable
     }
     public int Forward(int token, int position, bool output, bool ignoreEos)
     {
-        if (position >= Context) throw new ArgumentOutOfRangeException(nameof(position));
+        if (position < 0 || position >= Context) throw new ArgumentOutOfRangeException(nameof(position));
+        EnsureCacheCapacity(position + 1);
         gpu.Begin(); gpu.Dispatch("embedding", new() { N = Hidden, Position = (uint)token }, Hidden, 128, weights["model.language_model.embed_tokens.weight"].Binding, x);
         for (int layer = 0; layer < 40; layer++)
         {
@@ -95,7 +124,7 @@ internal sealed partial class QwenEngine : IDisposable
                 Project(path + ".q_proj", norm, qkv); Project(path + ".k_proj", norm, k); Project(path + ".v_proj", norm, v);
                 gpu.Dispatch("split_q", new(), 4096, 128, qkv, q, qgate);
                 Normalize(q, path + ".q_norm", q, 256, 16); Normalize(k, path + ".k_norm", k, 256, 2);
-                var attentionArgs = new KernelArgs { Position = (uint)position, K = (uint)Context, Theta = 10_000_000f };
+                var attentionArgs = new KernelArgs { Position = (uint)position, K = (uint)cacheCapacity, Theta = 10_000_000f };
                 gpu.Dispatch("rope_cache", attentionArgs, 4096, 128, q, k, v, rotated, keyCache[layer], valueCache[layer]);
                 gpu.Dispatch("attention_scores", attentionArgs, checked((uint)(16 * (position + 1) * 32)), 128, rotated, keyCache[layer], scores);
                 gpu.Dispatch("attention_softmax", attentionArgs, 16 * 256, 256, scores);
@@ -121,12 +150,12 @@ internal sealed partial class QwenEngine : IDisposable
     }
     public Generation Generate(int[] prompt, int maximum, bool ignoreEos, Func<string, bool>? onText = null, CancellationToken cancellation = default)
     {
-        if (prompt.Length == 0 || maximum < 1 || prompt.Length + maximum > Context) throw new ArgumentException("Context window exceeded or empty request");
+        maximum = ContextLimits.OutputBudget(prompt.Length, maximum, Context);
         Reset(); int predicted = -1; int position = 0;
         while (position < prompt.Length)
         {
             cancellation.ThrowIfCancellationRequested();
-            int count = Math.Min(512, prompt.Length - position);
+            int count = ContextLimits.PrefillCount(position, prompt.Length - position);
             if (BatchedPrefill && count >= 8)
             {
                 predicted = PrefillBlock(prompt.AsSpan(position, count), position, position + count == prompt.Length, ignoreEos);

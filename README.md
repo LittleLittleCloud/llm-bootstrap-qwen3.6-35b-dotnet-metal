@@ -15,8 +15,11 @@ architecture, but no backend code was copied.
 The model is official `Qwen/Qwen3.6-35B-A3B-FP8`, pinned at
 `95a723d08a9490559dae23d0cff1d9466213d989`. Packed E4M3 weights and their block
 scales are read directly; source BF16 tensors retain their values. Computation,
-KV and recurrent state are FP32. The default served window is 4096 tokens; `--context-window` configures 512 through
-32768 tokens.
+KV and recurrent state are FP32. The default served window is the checkpoint's
+native 262144 tokens. `--context-window` can select a smaller window (1–262144).
+KV storage starts at at most 4096 tokens and grows as positions are consumed;
+requesting a large output allowance does not reserve that whole allowance in memory.
+Prefill attention uses a 128 MiB score workspace and smaller tiles at long positions.
 Vision, MTP and speculation are excluded. Greedy text generation has thinking
 disabled. No OS memory/power limits are modified. All model files are external
 to Git and are checked against the manifest.
@@ -89,12 +92,20 @@ adapter; it is not precision-matched to this official FP8/FP32 engine. No contro
 speedup, SOTA, HumanEval, autonomy or self-hosting claim is made. Model weights,
 binaries and raw private evidence are not in Git.
 
-For the supplemental Pi HumanEval campaign, start the server with
-`--context-window 32768`; Pi reserves up to 4096 output tokens in addition to its
-input/tool history. API and engine checks share this configured total-token
-window, and KV/attention workspaces are allocated accordingly. The 4096 output
-budget cap is separate. A 2D attention score grid avoids overflowing a flattened
-32-bit thread count at longer positions.
+The earlier supplemental Pi HumanEval campaign used `--context-window 32768`
+and 4096 output tokens. Those historical measurements remain tied to that build.
+For interactive use, omit `--context-window` to use the native window. There is
+no separate 4096 output cap: a positive `max_tokens`/`max_output_tokens` is an
+upper bound, clamped to the space remaining after the formatted prompt. Omitting
+it on Chat/Responses permits the entire remaining window; Messages still requires
+`max_tokens`. Generation stops on EOS, stop strings, cancellation, or that bound.
+Input that leaves no output space is rejected. API and engine use the same rules.
+A 2D attention score grid avoids overflow of flattened thread counts.
+
+Native context is a positional limit, not a guarantee that every request fits
+physical memory or retains quality at that length. KV still uses FP32; allocations
+can fail under memory pressure. No OS memory limit or weight precision is changed.
+Set a lower `--context-window` when a bounded local memory footprint is needed.
 
 `context-self-test --model-dir /path/to/snapshot --context-window 32768` exercises
 a public arithmetic fixture longer than 4096 prompt tokens and overflow rejection.
