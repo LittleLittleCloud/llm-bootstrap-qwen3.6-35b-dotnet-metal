@@ -13,7 +13,7 @@ internal sealed partial class QwenEngine
             Tokens = B(Capacity); Hidden = B(Capacity * 2048); Norm = B(Capacity * 2048); Projection = B(Capacity * 2048);
             Qkv = B(Capacity * 8192); Z = B(Capacity * 4096); A = B(Capacity * 32); this.B = B(Capacity * 32); Conv = B(Capacity * 8192);
             Q = B(Capacity * 4096); K = B(Capacity * 2048); V = B(Capacity * 512); Rotated = B(Capacity * 4096); Qgate = B(Capacity * 4096);
-            Scores = B(Capacity * 16 * Context); Router = B(Capacity * 256); Ids = B(Capacity * 8); Rates = B(Capacity * 8);
+            Scores = B(Capacity * 16 * engine.ContextWindow); Router = B(Capacity * 256); Ids = B(Capacity * 8); Rates = B(Capacity * 8);
             Counts = B(256); Offsets = B(257); Tiles = B(512 * 4); TileCount = B(1); SortedTokens = B(Capacity * 8); Inverse = B(Capacity * 8);
             ExpertGate = B(Capacity * 8 * 512); ExpertUp = B(Capacity * 8 * 512); ExpertActivation = B(Capacity * 8 * 512); ExpertOutput = B(Capacity * 8 * 2048);
             SharedGate = B(Capacity * 512); SharedUp = B(Capacity * 512); SharedActivation = B(Capacity * 512); SharedOutput = B(Capacity * 2048); SharedWeight = B(Capacity);
@@ -51,9 +51,9 @@ internal sealed partial class QwenEngine
                 BatchProject(path + ".q_proj", b.Norm, b.Qkv, count); BatchProject(path + ".k_proj", b.Norm, b.K, count); BatchProject(path + ".v_proj", b.Norm, b.V, count);
                 gpu.Dispatch("batch_split_q", new() { M = (uint)count }, checked((uint)count * 4096), 128, b.Qkv, b.Q, b.Qgate);
                 Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
-                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = Context, Theta = 10_000_000f };
+                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)Context, Theta = 10_000_000f };
                 gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
-                gpu.Dispatch("batch_attention_scores", p, checked((uint)(count * 16 * (position + count) * 32)), 128, b.Rotated, keyCache[layer], b.Scores);
+                gpu.Dispatch2D("batch_attention_scores", p, checked((uint)(position + count) * 32), checked((uint)count * 16), 128, b.Rotated, keyCache[layer], b.Scores);
                 var normalization = p; normalization.Position = (uint)(position + count - 1);
                 gpu.Dispatch("attention_softmax", normalization, checked((uint)count * 16 * 256), 256, b.Scores);
                 gpu.Dispatch("batch_attention_values", p, checked((uint)count * 4096), 128, b.Scores, valueCache[layer], b.Qgate, b.Rotated);

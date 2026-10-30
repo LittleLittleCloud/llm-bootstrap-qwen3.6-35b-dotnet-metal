@@ -11,14 +11,27 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
-if (command is "generate" or "serve" or "compare-prefill" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve" or "compare-prefill")
+    if (command is "generate" or "serve" or "compare-prefill" or "context-self-test")
     {
-        using var engine = new QwenEngine(directory, kernelFile, manifestFile);
+        int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
+        using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow);
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
+        if (command == "context-self-test")
+        {
+            string fixture = string.Concat(Enumerable.Repeat("This sentence is harmless context. ", 700)) + "Reply with only the number: what is 2 + 2?";
+            var tokens = engine.Tokenizer.SimpleChat(fixture);
+            if (tokens.Length <= 4096 || tokens.Length + 8 > engine.ContextWindow) throw new Exception("Context fixture needs a configured window larger than 4096");
+            var generated = engine.Generate(tokens, 8, false);
+            if (generated.Text.Trim() != "4") throw new Exception("Long-context arithmetic smoke did not produce expected public-fixture answer");
+            try { engine.Generate(new int[engine.ContextWindow], 1, false); throw new Exception("Context overflow was accepted"); }
+            catch (ArgumentException) { }
+            Console.WriteLine(JsonSerializer.Serialize(new { context_window = engine.ContextWindow, prompt_tokens = tokens.Length, generated = generated.Tokens, text = generated.Text, overflow_rejected = true, metal_buffer_bytes = engine.AllocatedBytes }));
+            return;
+        }
         if (command == "compare-prefill")
         {
             string fixture = string.Concat(Enumerable.Repeat("This sentence is harmless context. ", 100)) + "Reply with only the number: what is 2 + 2?";
@@ -134,6 +147,29 @@ if (command == "kernel-self-test")
             if (Math.Abs(routeProb.Values<float>(routeTokens * 8)[t * 8 + i] - Math.Exp(values[expected[i]] - values[expected[0]]) / denominator) > 1e-6) throw new Exception("Parallel router probability mismatch");
             checks += 2;
         }
+    }
+    const int longContext = 32768, queryTokens = 2;
+    using var longQ = device.Allocate(queryTokens * 4096 * 4); using var longK = device.Allocate((ulong)longContext * 512 * 4); using var longScores = device.Allocate((ulong)queryTokens * 16 * longContext * 4);
+    for (int i = 0; i < queryTokens * 4096; i++) longQ.Values<float>(queryTokens * 4096)[i] = (i % 19 - 9) / 32f;
+    for (int i = 0; i < longContext * 512; i++) longK.Values<float>(longContext * 512)[i] = (i % 31 - 15) / 32f;
+    device.Begin(); device.Dispatch2D("batch_attention_scores", new() { M = queryTokens, Position = longContext - queryTokens, K = longContext }, longContext * 32, queryTokens * 16, 128, longQ, longK, longScores); device.End();
+    for (int t = 0; t < queryTokens; t++) for (int h = 0; h < 16; h++) foreach (int position in new[] { 0, 13123, longContext - 2, longContext - 1 })
+    {
+        float actual = longScores.Values<float>(queryTokens * 16 * longContext)[(t * 16 + h) * longContext + position];
+        if (position > longContext - queryTokens + t) { if (!float.IsNegativeInfinity(actual)) throw new Exception("Long-window causal mask mismatch"); }
+        else
+        {
+            double expected = 0;
+            for (int d = 0; d < 256; d++) expected += (double)longQ.Values<float>(queryTokens * 4096)[t * 4096 + h * 256 + d] * longK.Values<float>(longContext * 512)[(position * 2 + h / 8) * 256 + d] / 16;
+            if (Math.Abs(actual - expected) > 1e-6) throw new Exception("Long-window 2D attention score mismatch");
+        }
+        checks++;
+    }
+    foreach (int valid in new[] { 512, 4096, 8192, 32768 }) { if (QwenEngine.ValidateContextWindow(valid) != valid) throw new Exception("Valid context rejected"); checks++; }
+    foreach (int invalid in new[] { -1, 0, 511, 32769, int.MaxValue })
+    {
+        try { QwenEngine.ValidateContextWindow(invalid); throw new Exception("Invalid context accepted"); }
+        catch (ArgumentOutOfRangeException) { checks++; }
     }
     Console.WriteLine(JsonSerializer.Serialize(new { passed = checks, allocated_bytes = device.AllocatedBytes, native_model_backend = "original Metal kernels" }));
     return;

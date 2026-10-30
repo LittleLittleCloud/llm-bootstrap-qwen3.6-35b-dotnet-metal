@@ -6,7 +6,11 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine : IDisposable
 {
-    const int Hidden = 2048, Context = 4096, Vocabulary = 248320;
+    const int Hidden = 2048, Vocabulary = 248320;
+    public const int DefaultContextWindow = 4096, MaximumContextWindow = 32768;
+    readonly int Context;
+    public int ContextWindow => Context;
+    public static int ValidateContextWindow(int contextWindow) => contextWindow is >= 512 and <= MaximumContextWindow ? contextWindow : throw new ArgumentOutOfRangeException(nameof(contextWindow), "Context window must be between 512 and 32768 tokens");
     readonly Metal gpu;
     readonly Checkpoint weights;
     readonly List<GpuBuffer> owned = new();
@@ -16,8 +20,9 @@ internal sealed partial class QwenEngine : IDisposable
     public ulong AllocatedBytes => gpu.AllocatedBytes;
     public bool BatchedPrefill { get; set; } = true;
     GpuBuffer Buffer(int floats) { var result = gpu.Allocate(checked((ulong)floats * 4)); owned.Add(result); return result; }
-    public QwenEngine(string directory, string kernelPath, string manifestPath)
+    public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow)
     {
+        Context = ValidateContextWindow(contextWindow);
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         Tokenizer = new ByteBpe(Path.Combine(directory, "tokenizer.json"), manifest.RootElement.GetProperty("tokenizer_sha256").GetString()!);
         if (Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, "chat_template.jinja")))) != manifest.RootElement.GetProperty("chat_template_sha256").GetString()) throw new InvalidDataException("Chat-template hash mismatch");
@@ -90,7 +95,7 @@ internal sealed partial class QwenEngine : IDisposable
                 Project(path + ".q_proj", norm, qkv); Project(path + ".k_proj", norm, k); Project(path + ".v_proj", norm, v);
                 gpu.Dispatch("split_q", new(), 4096, 128, qkv, q, qgate);
                 Normalize(q, path + ".q_norm", q, 256, 16); Normalize(k, path + ".k_norm", k, 256, 2);
-                var attentionArgs = new KernelArgs { Position = (uint)position, K = Context, Theta = 10_000_000f };
+                var attentionArgs = new KernelArgs { Position = (uint)position, K = (uint)Context, Theta = 10_000_000f };
                 gpu.Dispatch("rope_cache", attentionArgs, 4096, 128, q, k, v, rotated, keyCache[layer], valueCache[layer]);
                 gpu.Dispatch("attention_scores", attentionArgs, checked((uint)(16 * (position + 1) * 32)), 128, rotated, keyCache[layer], scores);
                 gpu.Dispatch("attention_softmax", attentionArgs, 16 * 256, 256, scores);
