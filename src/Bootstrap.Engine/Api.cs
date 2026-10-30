@@ -24,27 +24,18 @@ internal static class Api
                     await serial.WaitAsync(context.RequestAborted); acquired = true;
                     var writer = new ApiWriter(context, input, body, prompt.Length);
                     await writer.Start();
-                    var raw = new StringBuilder(); int emitted = 0; string? stopFound = null;
-                    int keep = input.Stops.Length == 0 ? 0 : input.Stops.Max(s => s.Length) - 1;
-                    var generation = await Task.Run(() => engine.Generate(prompt, input.Maximum, input.IgnoreEos, piece =>
-                    {
-                        raw.Append(piece); int end = raw.Length;
-                        foreach (var stop in input.Stops)
-                        {
-                            int position = raw.ToString().IndexOf(stop, StringComparison.Ordinal);
-                            if (position >= 0 && position < end) { end = position; stopFound = stop; }
-                        }
-                        int safe = stopFound is null ? Math.Max(emitted, end - keep) : end;
-                        if (safe > emitted && input.Tools.Count == 0)
-                        {
-                            writer.Text(raw.ToString(emitted, safe - emitted)).GetAwaiter().GetResult(); emitted = safe;
-                        }
-                        return stopFound is null;
-                    }, context.RequestAborted), context.RequestAborted);
+                    void Text(string part) => writer.Text(part).GetAwaiter().GetResult();
+                    var parser = input.Tools.Count == 0 ? null : new ToolStreamParser(input.Tools, Text,
+                        (index, id, name) => writer.ToolStart(index, id, name).GetAwaiter().GetResult(),
+                        (index, part) => writer.ToolArguments(index, part).GetAwaiter().GetResult(),
+                        (index, call) => writer.ToolEnd(index, call).GetAwaiter().GetResult());
+                    var output = new StopSequenceBuffer(input.Stops, part => { if (parser is null) Text(part); else parser.Append(part); });
+                    var generation = await Task.Run(() => engine.Generate(prompt, input.Maximum, input.IgnoreEos,
+                        output.Append, context.RequestAborted), context.RequestAborted);
+                    output.Finish(); string? stopFound = output.Matched;
                     string finalText = generation.Text;
                     if (stopFound is not null) finalText = finalText[..finalText.IndexOf(stopFound, StringComparison.Ordinal)];
-                    if (input.Tools.Count == 0 && finalText.Length > emitted) await writer.Text(finalText[emitted..]);
-                    var parsed = input.Tools.Count > 0 ? ChatParsing.ParseOutput(finalText, input.Tools) : (finalText, new List<FunctionCall>());
+                    var parsed = parser is not null ? parser.Finish() : (finalText, new List<FunctionCall>());
                     await writer.Complete(parsed.Item1, parsed.Item2, generation, stopFound);
                 }
                 catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
@@ -74,7 +65,13 @@ internal sealed class ApiWriter(HttpContext context, ChatInput input, JsonObject
     readonly string id = (input.Api == "chat" ? "chatcmpl_" : input.Api == "responses" ? "resp_" : "msg_") + Guid.NewGuid().ToString("N");
     readonly string itemId = "msg_" + Guid.NewGuid().ToString("N");
     readonly long created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-    int sequence; bool textStarted; readonly StringBuilder streamedText = new();
+    int sequence; bool textStarted, textClosed; readonly StringBuilder streamedText = new();
+    sealed record StreamTool(string Id, string Name, int OutputIndex)
+    {
+        public StringBuilder Arguments { get; } = new();
+        public bool Complete { get; set; }
+    }
+    readonly List<StreamTool> streamedTools = new();
     static Dictionary<string, object?> D(params (string, object?)[] fields) => fields.ToDictionary(x => x.Item1, x => x.Item2);
     object Usage(int output, bool chat = false) => chat ? new { prompt_tokens = promptTokens, completion_tokens = output, total_tokens = promptTokens + output, prompt_tokens_details = new { cached_tokens = 0 } } : (object)new { input_tokens = promptTokens, output_tokens = output, total_tokens = promptTokens + output };
     object Part(string text) => new { type = "output_text", text, annotations = Array.Empty<object>(), logprobs = Array.Empty<object>() };
@@ -108,6 +105,7 @@ internal sealed class ApiWriter(HttpContext context, ChatInput input, JsonObject
     public async Task Text(string text)
     {
         if (text.Length == 0) return;
+        if (textClosed) throw new InvalidDataException("Text arrived after the tool stream started");
         if (!textStarted && input.Stream)
         {
             if (input.Api == "responses")
@@ -122,16 +120,58 @@ internal sealed class ApiWriter(HttpContext context, ChatInput input, JsonObject
         else if (input.Api == "responses") await Event("response.output_text.delta", new { type = "response.output_text.delta", item_id = itemId, output_index = 0, content_index = 0, delta = text });
         else await Event("content_block_delta", new { type = "content_block_delta", index = 0, delta = new { type = "text_delta", text } });
     }
+    async Task CloseText(string status = "completed")
+    {
+        if (!textStarted || textClosed) return;
+        textClosed = true; string text = streamedText.ToString();
+        if (input.Api == "responses")
+        {
+            await Event("response.output_text.done", new { type = "response.output_text.done", item_id = itemId, output_index = 0, content_index = 0, text });
+            await Event("response.content_part.done", new { type = "response.content_part.done", item_id = itemId, output_index = 0, content_index = 0, part = Part(text) });
+            await Event("response.output_item.done", new { type = "response.output_item.done", output_index = 0, item = Item(text, status) });
+        }
+        else if (input.Api == "messages") await Event("content_block_stop", new { type = "content_block_stop", index = 0 });
+    }
+    public async Task ToolStart(int index, string callId, string name)
+    {
+        if (index != streamedTools.Count) throw new InvalidDataException("Out-of-order tool call");
+        await CloseText();
+        var tool = new StreamTool(callId, name, (textStarted ? 1 : 0) + index); streamedTools.Add(tool);
+        if (input.Api == "chat") await Event(null, Chunk(new { tool_calls = new[] { new { index, id = callId, type = "function", function = new { name, arguments = "" } } } }));
+        else if (input.Api == "responses") await Event("response.output_item.added", new { type = "response.output_item.added", output_index = tool.OutputIndex, item = new { id = "fc_" + callId, type = "function_call", status = "in_progress", call_id = callId, name, arguments = "" } });
+        else await Event("content_block_start", new { type = "content_block_start", index = tool.OutputIndex, content_block = new { type = "tool_use", id = callId, name, input = new { } } });
+    }
+    public async Task ToolArguments(int index, string part)
+    {
+        var tool = streamedTools[index];
+        if (tool.Complete) throw new InvalidDataException("Arguments arrived after tool completion");
+        tool.Arguments.Append(part);
+        if (input.Api == "chat") await Event(null, Chunk(new { tool_calls = new[] { new { index, function = new { arguments = part } } } }));
+        else if (input.Api == "responses") await Event("response.function_call_arguments.delta", new { type = "response.function_call_arguments.delta", item_id = "fc_" + tool.Id, output_index = tool.OutputIndex, delta = part });
+        else await Event("content_block_delta", new { type = "content_block_delta", index = tool.OutputIndex, delta = new { type = "input_json_delta", partial_json = part } });
+    }
+    public async Task ToolEnd(int index, FunctionCall call)
+    {
+        var tool = streamedTools[index];
+        if (tool.Id != call.Id || tool.Name != call.Name || tool.Arguments.ToString() != call.JsonArguments) throw new InvalidDataException("Streamed arguments differ from the final tool call");
+        tool.Complete = true;
+        if (input.Api == "responses")
+        {
+            await Event("response.function_call_arguments.done", new { type = "response.function_call_arguments.done", item_id = "fc_" + call.Id, output_index = tool.OutputIndex, arguments = call.JsonArguments });
+            await Event("response.output_item.done", new { type = "response.output_item.done", output_index = tool.OutputIndex, item = new { id = "fc_" + call.Id, type = "function_call", status = "completed", call_id = call.Id, name = call.Name, arguments = call.JsonArguments } });
+        }
+        else if (input.Api == "messages") await Event("content_block_stop", new { type = "content_block_stop", index = tool.OutputIndex });
+    }
     public async Task Complete(string text, List<FunctionCall> calls, Generation generation, string? stop)
     {
         int count = generation.Tokens.Length;
         string finish = calls.Count > 0 ? "tool_calls" : stop is not null ? "stop" : generation.FinishReason;
         string status = finish == "length" ? "incomplete" : "completed";
         string reason = calls.Count > 0 ? "tool_use" : stop is not null ? "stop_sequence" : finish == "length" ? "max_tokens" : "end_turn";
-        object[] toolCalls = calls.Select(c => (object)new { id = c.Id, type = "function", function = new { name = c.Name, arguments = c.Arguments.ToJsonString() } }).ToArray();
+        object[] toolCalls = calls.Select(c => (object)new { id = c.Id, type = "function", function = new { name = c.Name, arguments = c.JsonArguments } }).ToArray();
         var output = new List<object>();
         if (text.Length > 0) output.Add(Item(text, status));
-        output.AddRange(calls.Select(c => (object)new { id = "fc_" + c.Id, type = "function_call", status = "completed", call_id = c.Id, name = c.Name, arguments = c.Arguments.ToJsonString() }));
+        output.AddRange(calls.Select(c => (object)new { id = "fc_" + c.Id, type = "function_call", status = "completed", call_id = c.Id, name = c.Name, arguments = c.JsonArguments }));
         var blocks = new List<object>(); if (text.Length > 0) blocks.Add(new { type = "text", text });
         blocks.AddRange(calls.Select(c => (object)new { type = "tool_use", id = c.Id, name = c.Name, input = c.Arguments }));
         if (!input.Stream)
@@ -144,47 +184,20 @@ internal sealed class ApiWriter(HttpContext context, ChatInput input, JsonObject
             };
             await context.Response.WriteAsJsonAsync(value, context.RequestAborted); return;
         }
-        if (input.Tools.Count > 0 && text.Length > 0) await Text(text);
+        if (text != streamedText.ToString() || calls.Count != streamedTools.Count || streamedTools.Any(t => !t.Complete)) throw new InvalidDataException("Incomplete or inconsistent stream");
+        await CloseText(status);
         if (input.Api == "chat")
         {
-            for (int i = 0; i < calls.Count; i++)
-            {
-                var call = calls[i]; await Event(null, Chunk(new { tool_calls = new[] { new { index = i, id = call.Id, type = "function", function = new { name = call.Name, arguments = call.Arguments.ToJsonString() } } } }));
-            }
             await Event(null, Chunk(new { }, finish));
             if (body["stream_options"]?["include_usage"]?.GetValue<bool>() == true) await Event(null, new { id, @object = "chat.completion.chunk", created, model = ChatParsing.Model, choices = Array.Empty<object>(), usage = Usage(count, true) });
             await context.Response.WriteAsync("data: [DONE]\n\n", context.RequestAborted); await context.Response.Body.FlushAsync(context.RequestAborted);
         }
         else if (input.Api == "responses")
         {
-            if (textStarted)
-            {
-                await Event("response.output_text.done", new { type = "response.output_text.done", item_id = itemId, output_index = 0, content_index = 0, text });
-                await Event("response.content_part.done", new { type = "response.content_part.done", item_id = itemId, output_index = 0, content_index = 0, part = Part(text) });
-                await Event("response.output_item.done", new { type = "response.output_item.done", output_index = 0, item = Item(text, status) });
-            }
-            int offset = text.Length > 0 ? 1 : 0;
-            for (int i = 0; i < calls.Count; i++)
-            {
-                var call = calls[i]; string item = "fc_" + call.Id; int index = offset + i; string arguments = call.Arguments.ToJsonString();
-                await Event("response.output_item.added", new { type = "response.output_item.added", output_index = index, item = new { id = item, type = "function_call", status = "in_progress", call_id = call.Id, name = call.Name, arguments = "" } });
-                await Event("response.function_call_arguments.delta", new { type = "response.function_call_arguments.delta", item_id = item, output_index = index, delta = arguments });
-                await Event("response.function_call_arguments.done", new { type = "response.function_call_arguments.done", item_id = item, output_index = index, arguments });
-                await Event("response.output_item.done", new { type = "response.output_item.done", output_index = index, item = output[index] });
-            }
             await Event("response." + status, new { type = "response." + status, response = Response(status, output.ToArray(), count) });
         }
         else
         {
-            if (textStarted) await Event("content_block_stop", new { type = "content_block_stop", index = 0 });
-            int offset = text.Length > 0 ? 1 : 0;
-            for (int i = 0; i < calls.Count; i++)
-            {
-                var call = calls[i]; int index = offset + i;
-                await Event("content_block_start", new { type = "content_block_start", index, content_block = new { type = "tool_use", id = call.Id, name = call.Name, input = new { } } });
-                await Event("content_block_delta", new { type = "content_block_delta", index, delta = new { type = "input_json_delta", partial_json = call.Arguments.ToJsonString() } });
-                await Event("content_block_stop", new { type = "content_block_stop", index });
-            }
             await Event("message_delta", new { type = "message_delta", delta = new { stop_reason = reason, stop_sequence = stop }, usage = new { output_tokens = count } });
             await Event("message_stop", new { type = "message_stop" });
         }
