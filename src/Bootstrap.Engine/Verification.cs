@@ -63,7 +63,8 @@ internal sealed partial class QwenEngine
         if (draft is null) throw new InvalidOperationException("--draft-dir is required");
         string[] fixtures = [
             "Write a Python function that returns the sum of squares of a list of integers. Explain the function and give three examples.",
-            "Write a Python function to merge two sorted lists, with a docstring and tests."
+            "Write a Python function to merge two sorted lists, with a docstring and tests.",
+            string.Concat(Enumerable.Repeat("This sentence is harmless context. ", 400)) + "Write a Python function to reverse the words in a string, with examples."
         ];
         var cases = new List<object>();
         foreach (string fixture in fixtures)
