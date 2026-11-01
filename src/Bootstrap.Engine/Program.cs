@@ -25,7 +25,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "context-self-test"
         engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
         if (command == "speculation-self-test") { engine.SpeculationSelfTest(); return; }
         if (command == "profile-decode") { engine.ProfileDecode(); return; }
-        if (command == "draft-self-test") { engine.DraftSelfTest(Option("--output-dir") ?? throw new ArgumentException("--output-dir is required")); return; }
+        if (command == "draft-self-test") { engine.DraftSelfTest(Option("--output-dir") ?? throw new ArgumentException("--output-dir is required"), int.Parse(Option("--fixture-context") ?? "16")); return; }
         if (command == "verification-self-test") { engine.VerificationSelfTest(); return; }
         if (command == "prefix-cache-self-test") { PrefixCacheSelfTest.Run(engine); return; }
         if (command == "context-self-test")

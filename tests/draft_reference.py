@@ -68,6 +68,8 @@ def main():
 
     features = (((np.arange(context * 16384, dtype=np.int64) * 13) % 2001 - 1000).astype(np.float32) * np.float32(0.001)).reshape(context, 16384)
     ctx = norm("hidden_norm", project("fc", features))
+    retained = min(2048, context)
+    ctx = ctx[-retained:]
     token_ids = [anchor] + [248077] * (width - 1)
     embeddings = target.get("model.language_model.embed_tokens.weight")
     hidden = embeddings[token_ids].copy()
@@ -76,14 +78,14 @@ def main():
         path = f"layers.{layer}"
         prepared, dynamic = prepare(path + ".attention_conv", norm(path + ".input_layernorm", hidden))
         q = norm(path + ".self_attn.q_norm", project(path + ".self_attn.q_proj", prepared).reshape(width, 32, 128))
-        k = np.concatenate([project(path + ".self_attn.k_proj", ctx), project(path + ".self_attn.k_proj", prepared)]).reshape(context + width, 8, 128)
+        k = np.concatenate([project(path + ".self_attn.k_proj", ctx), project(path + ".self_attn.k_proj", prepared)]).reshape(retained + width, 8, 128)
         k = norm(path + ".self_attn.k_norm", k)
-        v = np.concatenate([project(path + ".self_attn.v_proj", ctx), project(path + ".self_attn.v_proj", prepared)]).reshape(context + width, 8, 128)
+        v = np.concatenate([project(path + ".self_attn.v_proj", ctx), project(path + ".self_attn.v_proj", prepared)]).reshape(retained + width, 8, 128)
         q = rope(q, np.arange(context, context + width))
-        k = np.repeat(rope(k, np.arange(context + width)), 4, axis=1)
+        k = np.repeat(rope(k, np.arange(context - retained, context + width)), 4, axis=1)
         v = np.repeat(v, 4, axis=1)
         scores = np.einsum("qhd,khd->qhk", q, k, optimize=True) / np.sqrt(np.float32(128))
-        visible = (np.arange(context, context + width)[:, None] - np.arange(context + width)[None, :]) < 2048
+        visible = (np.arange(context, context + width)[:, None] - np.arange(context - retained, context + width)[None, :]) < 2048
         scores = np.where(visible[:, None, :], scores, -np.inf)
         probabilities = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
         probabilities /= np.sum(probabilities, axis=-1, keepdims=True)
@@ -104,7 +106,7 @@ def main():
         scores = logits[row, candidates] + (pre[predecessor] * codes[row]) @ post[candidates].T
         predecessor = int(candidates[np.argmax(scores)])
         proposals.append(predecessor)
-    actual_context = np.fromfile(args.fixture_dir / "draft-context.f32", dtype="<f4").reshape(context, 2048)
+    actual_context = np.fromfile(args.fixture_dir / "draft-context.f32", dtype="<f4").reshape(retained, 2048)
     actual_hidden = np.fromfile(args.fixture_dir / "draft-hidden.f32", dtype="<f4").reshape(width, 2048)
     report = {"oracle": "independent NumPy FP32", "context_max_abs_error": float(np.max(np.abs(ctx - actual_context))), "hidden_max_abs_error": float(np.max(np.abs(hidden - actual_hidden))), "hidden_rms_error": float(np.sqrt(np.mean((hidden - actual_hidden) ** 2))), "expected_proposals": proposals, "actual_proposals": fixture["proposals"]}
     report["passed"] = bool(np.allclose(ctx, actual_context, atol=1e-3, rtol=1e-3) and np.allclose(hidden, actual_hidden, atol=1e-3, rtol=1e-3) and proposals == fixture["proposals"])

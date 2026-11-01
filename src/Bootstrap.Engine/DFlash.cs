@@ -21,11 +21,12 @@ internal sealed partial class QwenEngine
         draft = new DFlashDraft(this, directory, manifest);
     }
 
-    public void DraftSelfTest(string directory)
+    public bool DraftLoaded => draft is not null;
+    public void DraftSelfTest(string directory, int context = 16)
     {
         if (draft is null) throw new InvalidOperationException("--draft-dir is required");
         Directory.CreateDirectory(directory);
-        draft.ExportSyntheticFixture(directory);
+        draft.ExportSyntheticFixture(directory, context);
     }
 
     // All draft weights stay BF16; activations and KV stay FP32. The target
@@ -140,13 +141,18 @@ internal sealed partial class QwenEngine
             return proposals.Values<int>(count - 1).ToArray();
         }
         void Add(GpuBuffer residual, GpuBuffer update, int count) => e.gpu.Dispatch("add", new() { N = (uint)(count * Hidden) }, (uint)(count * Hidden), 128, residual, update, residual);
-        public void ExportSyntheticFixture(string directory)
+        public void ExportSyntheticFixture(string directory, int context)
         {
             Reset();
-            const int context = 16, width = 8, anchor = 1234;
-            var data = features.Values<float>(context * Hidden * 8);
-            for (int i = 0; i < data.Length; i++) data[i] = ((i * 13 % 2001) - 1000) * 0.001f;
-            e.gpu.Begin(); CommitFeatures(context, 0); e.gpu.End();
+            if (context is < 1 or > 4096) throw new ArgumentOutOfRangeException(nameof(context));
+            const int width = 8, anchor = 1234;
+            for (int start = 0; start < context; start += 512)
+            {
+                int count = Math.Min(512, context - start);
+                var data = features.Values<float>(count * Hidden * 8);
+                for (int i = 0; i < data.Length; i++) data[i] = ((((start * Hidden * 8 + i) * 13) % 2001) - 1000) * 0.001f;
+                e.gpu.Begin(); CommitFeatures(count, start); e.gpu.End();
+            }
             int[] first = Propose(anchor, context, width);
             float[] hiddenOutput = norm.Values<float>(width * Hidden).ToArray();
             int[] cached = Propose(anchor, context, width);
@@ -154,7 +160,10 @@ internal sealed partial class QwenEngine
                 throw new Exception("Draft context-KV reuse changed output");
             void Write(string name, ReadOnlySpan<float> values) => File.WriteAllBytes(Path.Combine(directory, name), System.Runtime.InteropServices.MemoryMarshal.AsBytes(values).ToArray());
             Write("draft-hidden.f32", hiddenOutput);
-            Write("draft-context.f32", Context.Values<float>(context * Hidden));
+            int retained = Math.Min(Window, context);
+            var logicalContext = new float[retained * Hidden];
+            for (int row = 0; row < retained; row++) Context.Values<float>(Hidden, (ulong)((context - retained + row) % Window) * Hidden * 4).CopyTo(logicalContext.AsSpan(row * Hidden, Hidden));
+            Write("draft-context.f32", logicalContext);
             File.WriteAllText(Path.Combine(directory, "draft-fixture.json"), JsonSerializer.Serialize(new { context, width, anchor, proposals = first, context_kv_reuse_bitwise = true }));
             Console.WriteLine(JsonSerializer.Serialize(new { draft_fixture = directory, proposals = first, context_kv_reuse_bitwise = true }));
         }
