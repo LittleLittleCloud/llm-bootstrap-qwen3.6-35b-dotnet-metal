@@ -107,6 +107,21 @@ physical memory or retains quality at that length. KV still uses FP32; allocatio
 can fail under memory pressure. No OS memory limit or weight precision is changed.
 Set a lower `--context-window` when a bounded local memory footprint is needed.
 
+Tool-enabled requests stream during generation on Chat Completions, Responses,
+and Messages. An incremental parser hides the model's XML control markup, emits
+ordinary text immediately, and converts function parameters into JSON argument
+deltas. String and JSON object/array values stream as they arrive; numeric and
+boolean scalars wait for their parameter delimiter so they can be validated and
+normalized. IDs and tool names precede argument fragments. Final arguments match
+the concatenated fragments exactly. Incomplete, undefined or malformed calls do
+not receive a successful stream completion. Clients execute tools only after the
+completed call/turn, rather than on a partial argument fragment.
+
+Run `streaming-self-test` for deterministic parser/writer checks, including every
+two-way split of the mixed-type fixture, single-character Unicode chunks,
+stop-marker boundaries, early emission, multiple calls and all three protocols.
+These fixtures are separate from live-model streaming and API conformance checks.
+
 `context-self-test --model-dir /path/to/snapshot --context-window 32768` exercises
 a public arithmetic fixture longer than 4096 prompt tokens and overflow rejection.
 Kernel checks independently test attention scores and causal masking near the
