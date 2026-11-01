@@ -58,7 +58,7 @@ preflight for streaming requests. The endpoint has no authentication requirement
 The original Kestrel server provides the selected experiment behavior through
 `/v1/models`, `/v1/chat/completions`, `/v1/responses` and `/v1/messages`, including
 streaming and generic model-generated tool calls. It serializes inference and
-resets each request's state. This is an experimental local endpoint, not a
+reuses matching prompt prefixes with bounded hybrid-state checkpoints. This is an experimental local endpoint, not a
 claim of implementing every optional feature of those APIs.
 
 Default prefill works in blocks of at most 512 tokens, grouping experts on GPU
@@ -82,7 +82,8 @@ to another model implementation or general output quality.
 The separate LLM Bootstrap evaluation repository is pinned in the experiment
 contract. Run its complete `engine-api-conformance` before its `engine-throughput`.
 The experiment selects `prefill.in2k.out1,decode.in128.out256`, one warm-up and
-three formal passes, `ignore_eos=true`, no prefix reuse. Exact runtime hashes and
+three formal passes, `ignore_eos=true`, no prefix reuse (`--no-prefix-cache` on
+current builds). Exact runtime hashes and
 all favorable/unfavorable measurements belong to the separate results report.
 Do not interpret build/unit checks as throughput or semantic-quality evidence.
 
@@ -130,3 +131,42 @@ These fixtures are separate from live-model streaming and API conformance checks
 a public arithmetic fixture longer than 4096 prompt tokens and overflow rejection.
 Kernel checks independently test attention scores and causal masking near the
 32768-token boundary. These checks are not a HumanEval score.
+
+## Prefix caching
+
+Caching is enabled by default. Each engine instance keeps one active token lineage
+and at most four checkpoints. Matching uses the complete formatted token IDs,
+including system text, tool schemas and chat control tokens. Checkpoints prioritize
+the first and last message ends, the prompt end and the latest 4096-token boundary;
+spare slots retain earlier block boundaries. A request
+restores the latest checkpoint at or before its longest common prefix, then
+prefills only the suffix. Identical prompts reuse the whole prefill. Appending,
+editing or shortening can reuse an earlier retained checkpoint; an earlier
+mismatch or an unrelated conversation can miss and replace the active lineage.
+This is not a cache pool for multiple concurrent conversations.
+
+Each checkpoint copies all 30 DeltaNet recurrent states, convolution histories
+and final logits in FP32 CPU-owned arrays. The ten full-attention KV prefixes remain in their
+existing buffers; decode writes only beyond the saved prompt. Restoring a branch
+invalidates all later checkpoints before overwriting their KV. Snapshots use at
+most 255.04 MiB in addition to the existing KV/workspace allocations (plus up to
+1 MiB for token IDs). Freed checkpoint slots are reused until engine disposal.
+The model, weights, tokenizer, template and RoPE configuration are fixed for the
+engine instance; restarting starts empty. Changing the prefill mode, resetting,
+disabling caching, cancellation or inference/stream failure invalidates the cache.
+EOS policy and output limits may change: full hits select again from saved logits.
+Generated output is not added to the reusable prefix in this version.
+
+Chat Completions reports actual reuse in `usage.prompt_tokens_details.cached_tokens`;
+Responses uses `usage.input_tokens_details.cached_tokens`. Their input token totals
+include cached tokens. Messages reports `cache_read_input_tokens` separately from
+uncached `input_tokens`, including in `message_start`. No client cache hints are
+required. Keep system prompts and serialized tool definitions stable for reuse.
+
+Use `serve --no-prefix-cache ...` for cold-only measurements or to disable reuse.
+`prefix-cache-self-test --model-dir /path/to/snapshot` compares cached and uncached
+real-model token sequences for exact hits, conversation append, branch, shortened
+input, intermediate block hits, KV growth, EOS-policy changes and cancellation
+recovery. Exact-hit checks also compare every used KV entry, recurrent/conv state
+and final logits bit for bit. These implementation diagnostics are separate from
+official conformance and task-quality evaluations.

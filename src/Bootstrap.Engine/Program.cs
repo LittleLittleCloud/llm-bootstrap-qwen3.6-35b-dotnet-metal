@@ -12,15 +12,17 @@ string? Option(string name)
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
 if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
-if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve" or "compare-prefill" or "context-self-test")
+    if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test")
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
         using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow);
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
+        engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
+        if (command == "prefix-cache-self-test") { PrefixCacheSelfTest.Run(engine); return; }
         if (command == "context-self-test")
         {
             int repeats = int.Parse(Option("--fixture-repeats") ?? "700");
