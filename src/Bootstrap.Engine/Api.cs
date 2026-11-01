@@ -25,7 +25,7 @@ internal static class Api
                     var input = ChatParsing.Parse(body, api); int[] prompt = ChatFormatting.Format(engine.Tokenizer, input);
                     input = input with { Maximum = ContextLimits.OutputBudget(prompt.Length, input.Maximum, engine.ContextWindow) };
                     await serial.WaitAsync(context.RequestAborted); acquired = true;
-                    var writer = new ApiWriter(context, input, body, prompt.Length);
+                    var writer = new ApiWriter(context, input, body, prompt.Length, engine.CachedPrefixTokens(prompt));
                     await writer.Start();
                     void Text(string part) => writer.Text(part).GetAwaiter().GetResult();
                     var parser = input.Tools.Count == 0 ? null : new ToolStreamParser(input.Tools, Text,
@@ -41,9 +41,10 @@ internal static class Api
                     var parsed = parser is not null ? parser.Finish() : (finalText, new List<FunctionCall>());
                     await writer.Complete(parsed.Item1, parsed.Item2, generation, stopFound);
                 }
-                catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { }
+                catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested) { if (acquired) engine.ClearPrefixCache(); }
                 catch (Exception error) when (!context.Response.HasStarted)
                 {
+                    if (acquired) engine.ClearPrefixCache();
                     int status = error is ArgumentException or JsonException or InvalidOperationException or FormatException ? 400 : 500;
                     context.Response.StatusCode = status;
                     var failure = new Dictionary<string, object?> { ["error"] = new { type = status == 400 ? "invalid_request_error" : "api_error", message = status == 400 ? error.Message : "Inference failed; see local server diagnostics." } };
@@ -53,6 +54,7 @@ internal static class Api
                 }
                 catch (Exception error) when (context.Response.HasStarted)
                 {
+                    if (acquired) engine.ClearPrefixCache();
                     if (!context.RequestAborted.IsCancellationRequested) Console.Error.WriteLine("Stream failed: " + error.Message);
                     context.Abort();
                 }
@@ -63,7 +65,7 @@ internal static class Api
     }
 }
 
-internal sealed class ApiWriter(HttpContext context, ChatInput input, JsonObject body, int promptTokens)
+internal sealed class ApiWriter(HttpContext context, ChatInput input, JsonObject body, int promptTokens, int cachedTokens = 0)
 {
     readonly string id = (input.Api == "chat" ? "chatcmpl_" : input.Api == "responses" ? "resp_" : "msg_") + Guid.NewGuid().ToString("N");
     readonly string itemId = "msg_" + Guid.NewGuid().ToString("N");
@@ -76,11 +78,11 @@ internal sealed class ApiWriter(HttpContext context, ChatInput input, JsonObject
     }
     readonly List<StreamTool> streamedTools = new();
     static Dictionary<string, object?> D(params (string, object?)[] fields) => fields.ToDictionary(x => x.Item1, x => x.Item2);
-    object Usage(int output, bool chat = false) => chat ? new { prompt_tokens = promptTokens, completion_tokens = output, total_tokens = promptTokens + output, prompt_tokens_details = new { cached_tokens = 0 } } : (object)new { input_tokens = promptTokens, output_tokens = output, total_tokens = promptTokens + output };
+    object Usage(int output, bool chat = false) => chat ? new { prompt_tokens = promptTokens, completion_tokens = output, total_tokens = promptTokens + output, prompt_tokens_details = new { cached_tokens = cachedTokens } } : (object)new { input_tokens = promptTokens, output_tokens = output, total_tokens = promptTokens + output, input_tokens_details = new { cached_tokens = cachedTokens } };
     object Part(string text) => new { type = "output_text", text, annotations = Array.Empty<object>(), logprobs = Array.Empty<object>() };
     object Item(string text, string status, bool empty = false) => new { id = itemId, type = "message", role = "assistant", status, content = empty ? Array.Empty<object>() : new[] { Part(text) } };
     object Response(string status, object[] output, int tokens) => D(("id", id), ("object", "response"), ("created_at", created), ("status", status), ("model", ChatParsing.Model), ("output", output), ("error", null), ("incomplete_details", status == "incomplete" ? new { reason = "max_output_tokens" } : null), ("usage", status == "in_progress" ? null : Usage(tokens)), ("tools", input.Tools), ("tool_choice", body["tool_choice"] ?? JsonValue.Create("auto")), ("parallel_tool_calls", false), ("temperature", 0), ("top_p", 1), ("metadata", new { }), ("store", false), ("max_output_tokens", input.Maximum));
-    object Message(string? reason, object[] content, int tokens, string? stop) => new { id, type = "message", role = "assistant", model = ChatParsing.Model, content, stop_reason = reason, stop_sequence = stop, usage = new { input_tokens = promptTokens, output_tokens = tokens } };
+    object Message(string? reason, object[] content, int tokens, string? stop) => new { id, type = "message", role = "assistant", model = ChatParsing.Model, content, stop_reason = reason, stop_sequence = stop, usage = new { input_tokens = promptTokens - cachedTokens, cache_read_input_tokens = cachedTokens, cache_creation_input_tokens = 0, output_tokens = tokens } };
     object Chunk(object delta, string? finish = null) => new { id, @object = "chat.completion.chunk", created, model = ChatParsing.Model, choices = new[] { new { index = 0, delta, finish_reason = finish } } };
     async Task Event(string? name, object value)
     {
@@ -167,6 +169,7 @@ internal sealed class ApiWriter(HttpContext context, ChatInput input, JsonObject
     }
     public async Task Complete(string text, List<FunctionCall> calls, Generation generation, string? stop)
     {
+        if (cachedTokens != generation.CachedTokens) throw new InvalidOperationException("Prefix cache usage changed during inference");
         int count = generation.Tokens.Length;
         string finish = calls.Count > 0 ? "tool_calls" : stop is not null ? "stop" : generation.FinishReason;
         string status = finish == "length" ? "incomplete" : "completed";

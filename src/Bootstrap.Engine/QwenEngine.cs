@@ -21,7 +21,6 @@ internal sealed partial class QwenEngine : IDisposable
     readonly GpuBuffer[] state = new GpuBuffer[40], convolution = new GpuBuffer[40], keyCache = new GpuBuffer[40], valueCache = new GpuBuffer[40], descriptors = new GpuBuffer[40];
     public ByteBpe Tokenizer { get; }
     public ulong AllocatedBytes => gpu.AllocatedBytes;
-    public bool BatchedPrefill { get; set; } = true;
     GpuBuffer Buffer(int floats) { var result = gpu.Allocate(checked((ulong)floats * 4)); owned.Add(result); return result; }
     public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow)
     {
@@ -94,6 +93,7 @@ internal sealed partial class QwenEngine : IDisposable
     void Add(GpuBuffer residual, GpuBuffer output) => gpu.Dispatch("add", new() { N = Hidden }, Hidden, 128, residual, output, residual);
     public void Reset()
     {
+        ClearPrefixCache();
         gpu.Begin();
         for (int l = 0; l < 40; l++)
             if ((l + 1) % 4 != 0) { gpu.Clear(state[l]); gpu.Clear(convolution[l]); }
@@ -144,36 +144,60 @@ internal sealed partial class QwenEngine : IDisposable
         if (output)
         {
             Normalize(x, "model.language_model.norm", norm); Project("lm_head", norm, logits);
-            gpu.Dispatch("argmax", new() { N = Vocabulary, Flags = ignoreEos ? 1u : 0u, A = (uint)Tokenizer.End, B = (uint)Tokenizer.EndOfText }, 256, 256, logits, next);
+            SelectNext(ignoreEos);
         }
         gpu.End(); return output ? next.Values<int>(1)[0] : -1;
     }
     public Generation Generate(int[] prompt, int maximum, bool ignoreEos, Func<string, bool>? onText = null, CancellationToken cancellation = default)
     {
         maximum = ContextLimits.OutputBudget(prompt.Length, maximum, Context);
-        Reset(); int predicted = -1; int position = 0;
-        while (position < prompt.Length)
+        try
         {
             cancellation.ThrowIfCancellationRequested();
-            int count = ContextLimits.PrefillCount(position, prompt.Length - position);
-            if (BatchedPrefill && count >= 8)
+            int position = RestorePrefix(prompt, ignoreEos, out int predicted);
+            int cachedTokens = position;
+            var boundaries = PrefixBoundaries(prompt);
+            // Own the token key: callers may reuse/mutate their input array after return.
+            prefixTokens = PrefixCachingEnabled ? (int[])prompt.Clone() : [];
+            while (position < prompt.Length)
             {
-                predicted = PrefillBlock(prompt.AsSpan(position, count), position, position + count == prompt.Length, ignoreEos);
-                position += count;
+                cancellation.ThrowIfCancellationRequested();
+                int boundary = boundaries.First(p => p > position);
+                int count = ContextLimits.PrefillCount(position, boundary - position);
+                bool checkpoint = position + count == boundary;
+                if (BatchedPrefill && count >= 8)
+                {
+                    predicted = PrefillBlock(prompt.AsSpan(position, count), position, checkpoint, ignoreEos);
+                    position += count;
+                }
+                else
+                {
+                    // Sequential kernels advance one token regardless of the planned tile.
+                    checkpoint = position + 1 == boundary;
+                    predicted = Forward(prompt[position], position, checkpoint, ignoreEos); position++;
+                }
+                cancellation.ThrowIfCancellationRequested();
+                if (checkpoint) SavePrefix(position, boundaries);
             }
-            else predicted = Forward(prompt[position], position++, position == prompt.Length, ignoreEos);
+            var generated = new List<int>(); var text = new StringBuilder(); Decoder decoder = Encoding.UTF8.GetDecoder(); string finish = "length";
+            for (int i = 0; i < maximum; i++)
+            {
+                cancellation.ThrowIfCancellationRequested(); generated.Add(predicted);
+                if (!ignoreEos && (predicted == Tokenizer.End || predicted == Tokenizer.EndOfText)) { finish = "stop"; break; }
+                byte[] bytes = Tokenizer.TokenBytes(predicted); char[] chars = new char[bytes.Length + 4]; int count = decoder.GetChars(bytes, chars, flush: false);
+                string piece = new(chars, 0, count); text.Append(piece); if (piece.Length > 0 && onText is not null && !onText(piece)) { finish = "stop"; break; }
+                if (i + 1 < maximum) predicted = Forward(predicted, position++, true, ignoreEos);
+            }
+            cancellation.ThrowIfCancellationRequested();
+            return new(text.ToString(), prompt.Length, generated.ToArray(), finish, cachedTokens);
         }
-        var generated = new List<int>(); var text = new StringBuilder(); Decoder decoder = Encoding.UTF8.GetDecoder(); string finish = "length";
-        for (int i = 0; i < maximum; i++)
+        catch
         {
-            cancellation.ThrowIfCancellationRequested(); generated.Add(predicted);
-            if (!ignoreEos && (predicted == Tokenizer.End || predicted == Tokenizer.EndOfText)) { finish = "stop"; break; }
-            byte[] bytes = Tokenizer.TokenBytes(predicted); char[] chars = new char[bytes.Length + 4]; int count = decoder.GetChars(bytes, chars, flush: false);
-            string piece = new(chars, 0, count); text.Append(piece); if (piece.Length > 0 && onText is not null && !onText(piece)) { finish = "stop"; break; }
-            if (i + 1 < maximum) predicted = Forward(predicted, position++, true, ignoreEos);
+            // Cancellation, callback failures or GPU errors must never expose a
+            // partly written lineage to the next serialized request.
+            ClearPrefixCache(); throw;
         }
-        return new(text.ToString(), prompt.Length, generated.ToArray(), finish);
     }
     public void Dispose() { foreach (var buffer in owned) buffer.Dispose(); weights.Dispose(); gpu.Dispose(); }
 }
-internal sealed record Generation(string Text, int PromptTokens, int[] Tokens, string FinishReason);
+internal sealed record Generation(string Text, int PromptTokens, int[] Tokens, string FinishReason, int CachedTokens = 0);

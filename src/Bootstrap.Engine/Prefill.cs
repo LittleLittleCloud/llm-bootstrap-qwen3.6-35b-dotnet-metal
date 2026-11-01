@@ -83,7 +83,7 @@ internal sealed partial class QwenEngine
         {
             gpu.Dispatch("rmsnorm", new() { N = Hidden, M = 1, Epsilon = 1e-6f, Flags = 1 }, 256, 256, new Binding(b.Hidden, checked((ulong)(count - 1) * Hidden * 4)), weights["model.language_model.norm.weight"].Binding, norm, dummy);
             Project("lm_head", norm, logits);
-            gpu.Dispatch("argmax", new() { N = Vocabulary, Flags = ignoreEos ? 1u : 0u, A = (uint)Tokenizer.End, B = (uint)Tokenizer.EndOfText }, 256, 256, logits, next);
+            SelectNext(ignoreEos);
         }
         gpu.End(); return output ? next.Values<int>(1)[0] : -1;
     }

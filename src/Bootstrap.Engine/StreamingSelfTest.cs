@@ -92,6 +92,34 @@ internal static class StreamingSelfTest
             if (api == "messages") Expect(events.Count(e => e["type"]?.GetValue<string>() == "content_block_stop") == 3, "Blocks not closed once");
             checks += 6;
         }
+        foreach (string api in new[] { "chat", "responses", "messages" })
+        foreach (bool streamOutput in new[] { false, true })
+        {
+            var context = new DefaultHttpContext(); using var stream = new MemoryStream(); context.Response.Body = stream;
+            // WriteAsJsonAsync needs service resolution in a synthetic HttpContext.
+            using var services = new ServiceCollection().AddLogging().BuildServiceProvider(); context.RequestServices = services;
+            var input = new ChatInput(api, [new("user", "fixture")], new(), 10, streamOutput, false, [], false, false);
+            var body = new JsonObject { ["stream_options"] = new JsonObject { ["include_usage"] = true } };
+            var writer = new ApiWriter(context, input, body, 100, 80);
+            await writer.Start(); await writer.Text("ok");
+            await writer.Complete("ok", [], new("ok", 100, [1, 2], "stop", 80), null);
+            string wire = Encoding.UTF8.GetString(stream.ToArray());
+            JsonNode usage;
+            if (!streamOutput) usage = JsonNode.Parse(wire)!["usage"]!;
+            else
+            {
+                var events = wire.Split('\n').Where(line => line.StartsWith("data: ") && line != "data: [DONE]").Select(line => JsonNode.Parse(line[6..])!).ToList();
+                usage = api == "chat" ? events.Last()["usage"]! : api == "responses" ? events.Last()["response"]!["usage"]! : events.First()["message"]!["usage"]!;
+            }
+            if (api == "messages") Expect(usage["input_tokens"]!.GetValue<int>() == 20 && usage["cache_read_input_tokens"]!.GetValue<int>() == 80 && usage["cache_creation_input_tokens"]!.GetValue<int>() == 0, "Messages cache accounting double-counted input");
+            else
+            {
+                string total = api == "chat" ? "prompt_tokens" : "input_tokens";
+                string details = api == "chat" ? "prompt_tokens_details" : "input_tokens_details";
+                Expect(usage[total]!.GetValue<int>() == 100 && usage[details]!["cached_tokens"]!.GetValue<int>() == 80 && usage["total_tokens"]!.GetValue<int>() == 102, "OpenAI cache accounting changed totals");
+            }
+            checks++;
+        }
         Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { streaming_checks_passed = checks, apis = new[] { "chat", "responses", "messages" }, scope = "synthetic parser/writer fixtures, no model inference" }));
     }
 }
