@@ -244,14 +244,14 @@ kernel void draft_rotate(device float*q [[buffer(0)]],device float*k [[buffer(1)
 }
 kernel void draft_attention_scores(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*kc [[buffer(2)]],device float*scores [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
     uint index=i/32,slot=index%p.k,h=(index/p.k)%32,row=index/(p.k*32);if(row>=p.m)return;
-    uint start=p.pos>2048?p.pos-2048:0,t=start+slot;bool context=slot<2048,valid=context?(t<p.pos && p.pos+row-t<2048):(slot-2048<p.m);
-    float sum=0;if(valid){uint at=context?((t%2048)*8+h/4)*128:((slot-2048)*8+h/4)*128;device const float*key=context?kc:k;for(uint d=lane;d<128;d+=32)sum+=q[(row*32+h)*128+d]*key[at+d];}
+    uint start=p.pos>2048?p.pos-2048:0,t=start+slot;bool context=slot<p.a,valid=context?(t<p.pos && p.pos+row-t<2048):(slot-p.a<p.m);
+    float sum=0;if(valid){uint at=context?((t%2048)*8+h/4)*128:((slot-p.a)*8+h/4)*128;device const float*key=context?kc:k;for(uint d=lane;d<128;d+=32)sum+=q[(row*32+h)*128+d]*key[at+d];}
     sum=simd_sum(sum);if(lane==0)scores[index]=valid?sum*rsqrt(128.0f):-INFINITY;
 }
 kernel void draft_attention_values(device const float*scores [[buffer(0)]],device const float*v [[buffer(1)]],device const float*vc [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*4096)return;uint row=i/4096,h=(i%4096)/128,d=i%128,start=p.pos>2048?p.pos-2048:0;float sum=0;
     for(uint t=start;t<p.pos;++t)sum+=scores[(row*32+h)*p.k+t-start]*vc[((t%2048)*8+h/4)*128+d];
-    for(uint t=0;t<p.m;++t)sum+=scores[(row*32+h)*p.k+2048+t]*v[(t*8+h/4)*128+d];y[i]=sum;
+    for(uint t=0;t<p.m;++t)sum+=scores[(row*32+h)*p.k+p.a+t]*v[(t*8+h/4)*128+d];y[i]=sum;
 }
 // Greedy top-16 unary shortlist followed by the learned predecessor/successor
 // compatibility score. Anchor + selected predecessors form the candidate path.

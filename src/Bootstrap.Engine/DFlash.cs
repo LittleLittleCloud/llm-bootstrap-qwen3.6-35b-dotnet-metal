@@ -116,10 +116,10 @@ internal sealed partial class QwenEngine
                 Convolve(path + ".attention_conv", norm, prepared, count, false);
                 Project(path + ".self_attn.q_proj", prepared, q, count); Project(path + ".self_attn.k_proj", prepared, k, count); Project(path + ".self_attn.v_proj", prepared, v, count);
                 Normalize(path + ".self_attn.q_norm", q, q, 128, count * 32); Normalize(path + ".self_attn.k_norm", k, k, 128, count * 8);
-                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = Window + 8, Theta = 10_000_000f };
+                var p = new KernelArgs { M = (uint)count, Position = (uint)position, A = (uint)Math.Min(Window, position), K = (uint)(Math.Min(Window, position) + count), Theta = 10_000_000f };
                 e.gpu.Dispatch("draft_rotate", p, (uint)(count * 2048), 128, q, k);
-                e.gpu.Dispatch("draft_attention_scores", p, (uint)(count * 32 * (Window + 8) * 32), 128, q, k, keys[layer], scores);
-                var softmax = p; softmax.Position = Window + 7;
+                e.gpu.Dispatch("draft_attention_scores", p, (uint)(count * 32) * p.K * 32, 128, q, k, keys[layer], scores);
+                var softmax = p; softmax.Position = p.K - 1;
                 e.gpu.Dispatch("attention_softmax", softmax, (uint)(count * 32 * 256), 256, scores);
                 e.gpu.Dispatch("draft_attention_values", p, (uint)(count * 4096), 128, scores, v, values[layer], attention);
                 Project(path + ".self_attn.o_proj", attention, output, count);
