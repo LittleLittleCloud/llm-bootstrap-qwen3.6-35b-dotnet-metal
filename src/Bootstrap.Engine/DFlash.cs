@@ -74,6 +74,11 @@ internal sealed partial class QwenEngine
         {
             var tensor = weights[name + ".weight"];
             if (tensor.Dtype != "BF16") throw new InvalidDataException("Draft projections must remain BF16");
+            if (count <= VerificationCapacity)
+            {
+                e.gpu.Dispatch("matrix_product_tiny", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = 1 }, (uint)tensor.Shape[0] * 32, 128, input, tensor.Binding, e.dummy, destination);
+                return;
+            }
             e.gpu.Dispatch2D("matrix_product", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = 1 }, (uint)((tensor.Shape[0] + 63) / 64 * 256), (uint)((count + 31) / 32), 256, input, tensor.Binding, e.dummy, destination);
         }
         void Normalize(string name, GpuBuffer input, GpuBuffer destination, int size, int rows)

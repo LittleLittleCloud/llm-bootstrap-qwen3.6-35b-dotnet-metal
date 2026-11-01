@@ -141,6 +141,29 @@ if (command == "kernel-self-test")
         if (Math.Abs(actual - expected) > .002) throw new Exception($"Batched FP8 projection mismatch row={r} col={c}: {actual} != {expected}");
         checks++;
     }
+    foreach (int tinyRows in new[] { 1, 2, 3, 4, 7, 8 }) foreach (uint kind in new[] { 0u, 1u })
+    {
+        device.Begin(); device.Dispatch("matrix_product_tiny", new() { N = rows, M = (uint)tinyRows, K = cols, Kind = kind }, rows * 32, 128, matrixX, kind == 0 ? w : bfWeights, scales, matrixY); device.End();
+        for (int r = 0; r < tinyRows; r++) for (int c = 0; c < rows; c++)
+        {
+            double expected = 0;
+            for (int j = 0; j < cols; j++)
+            {
+                double weight;
+                if (kind == 1) weight = BitConverter.UInt32BitsToSingle((uint)bfWeights.Values<ushort>(rows * cols)[c * cols + j] << 16);
+                else
+                {
+                    int bits = w.Values<byte>(rows * cols)[c * cols + j], exponent = (bits >> 3) & 15, mantissa = bits & 7;
+                    weight = exponent == 0 ? mantissa / 512.0 : (1 + mantissa / 8.0) * Math.Pow(2, exponent - 7);
+                    if ((bits & 128) != 0) weight = -weight;
+                    weight *= j < 128 ? 1 : .5;
+                }
+                expected += weight * matrixX.Values<float>(matrixRows * cols)[r * cols + j];
+            }
+            if (Math.Abs(matrixY.Values<float>(tinyRows * rows)[r * rows + c] - expected) > (kind == 0 ? .002 : .00001)) throw new Exception($"Tiny matrix reference mismatch: rows={tinyRows}, kind={kind}, row={r}, column={c}");
+            checks++;
+        }
+    }
     const int routeTokens = 5;
     using var routeX = device.Allocate(routeTokens * 256 * 4); using var routeIds = device.Allocate(routeTokens * 8 * 4); using var routeProb = device.Allocate(routeTokens * 8 * 4);
     for (int t = 0; t < routeTokens; t++) for (int i = 0; i < 256; i++) routeX.Values<float>(routeTokens * 256)[t * 256 + i] = t == 0 ? 0 : ((i * 31 + t * 29) % (t * 17 + 11) - 15) / 8f;

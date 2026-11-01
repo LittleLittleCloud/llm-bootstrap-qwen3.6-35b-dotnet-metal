@@ -274,3 +274,30 @@ kernel void draft_select(device const float*logits [[buffer(0)]],device const fl
         if(tid==0){uint winner=0;for(uint j=1;j<16;++j)if(compat[j]>compat[winner]||(compat[j]==compat[winner]&&candidates[j]<candidates[winner]))winner=j;predecessor=candidates[winner];out[row-1]=int(predecessor);}threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
+
+// Small-block verification/drafting reuses each decoded weight for up to eight
+// input rows, without filling the 16/32-row tiles used by long prefill. Each
+// row keeps the serial GEMV float4 accumulation order and FP32 precision.
+kernel void matrix_product_tiny(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+    uint column=g/32;if(column>=p.n)return;float4 accum[8];
+    for(uint r=0;r<8;++r)accum[r]=0;
+    for(uint j=lane*4;j<p.k;j+=128){float4 weight=weight4(w,s,column,j,p.k,p.kind);
+        #pragma unroll
+        for(uint r=0;r<8;++r)if(r<p.m)accum[r]+=*((device const float4*)(x+r*p.k+j))*weight;
+    }
+    #pragma unroll
+    for(uint r=0;r<8;++r)if(r<p.m){float4 a=accum[r];float sum=simd_sum(a.x+a.y+a.z+a.w);if(lane==0)y[r*p.n+column]=sum;}
+}
+kernel void expert_matrix_tiny(device const float*x [[buffer(0)]],device const uchar*raw [[buffer(1)]],device const Expert*experts [[buffer(2)]],device const ExpertTile*tiles [[buffer(3)]],device const uint*tileCount [[buffer(4)]],device const uint*tokens [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint3 g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+    uint column=g.x/32;if(g.y>=tileCount[0]||column>=p.n)return;
+    ExpertTile tile=tiles[g.y];Expert descriptor=experts[tile.expert];
+    ulong woff=p.kind==0?descriptor.gate:p.kind==1?descriptor.up:descriptor.down,soff=p.kind==0?descriptor.gate_scale:p.kind==1?descriptor.up_scale:descriptor.down_scale;
+    float4 accum[8];uint inputRows[8];
+    for(uint r=0;r<8;++r){accum[r]=0;inputRows[r]=r<tile.count?(p.kind==2?tile.first+r:tokens[tile.first+r]):0;}
+    for(uint j=lane*4;j<p.k;j+=128){float4 weight=weight4(raw+woff,(device const ushort*)(raw+soff),column,j,p.k,0);
+        #pragma unroll
+        for(uint r=0;r<8;++r)if(r<tile.count)accum[r]+=*((device const float4*)(x+inputRows[r]*p.k+j))*weight;
+    }
+    #pragma unroll
+    for(uint r=0;r<8;++r)if(r<tile.count){float4 a=accum[r];float sum=simd_sum(a.x+a.y+a.z+a.w);if(lane==0)y[(tile.first+r)*p.n+column]=sum;}
+}
