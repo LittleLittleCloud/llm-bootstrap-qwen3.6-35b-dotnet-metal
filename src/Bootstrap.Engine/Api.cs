@@ -9,8 +9,11 @@ internal static class Api
     public static async Task Run(QwenEngine engine, int port)
     {
         var builder = WebApplication.CreateBuilder(Array.Empty<string>());
-        builder.WebHost.ConfigureKestrel(options => { options.ListenLocalhost(port); options.Limits.MaxRequestBodySize = 8 * 1024 * 1024; });
+        builder.Configuration["AllowedHosts"] = "*";
+        builder.WebHost.ConfigureKestrel(options => { options.ListenAnyIP(port); options.Limits.MaxRequestBodySize = 8 * 1024 * 1024; });
+        builder.Services.AddCors(options => options.AddDefaultPolicy(policy => policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
         var app = builder.Build(); var serial = new SemaphoreSlim(1, 1);
+        app.UseCors();
         app.MapGet("/v1/models", () => Results.Json(new { @object = "list", data = new[] { new { id = ChatParsing.Model, @object = "model", created = 0, owned_by = "bootstrap" } } }));
         foreach (var (path, api) in new[] { ("/v1/chat/completions", "chat"), ("/v1/responses", "responses"), ("/v1/messages", "messages") })
             app.MapPost(path, async (HttpContext context) =>
