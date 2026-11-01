@@ -49,8 +49,8 @@ internal static class ChatParsing
         if (body["model"]?.GetValue<string>() != Model) throw new ArgumentException("Unknown model");
         string budgetName = api == "responses" ? "max_output_tokens" : "max_tokens";
         if (api == "messages" && body[budgetName] is null) throw new ArgumentException("max_tokens is required");
-        int maximum = body[budgetName]?.GetValue<int>() ?? 64;
-        if (maximum < 1 || maximum > 4096) throw new ArgumentException("Invalid output token budget");
+        int maximum = body[budgetName]?.GetValue<int>() ?? int.MaxValue;
+        if (maximum < 1) throw new ArgumentException("Invalid output token budget");
         var messages = new List<ChatMessage>();
         if (api == "responses")
         {

@@ -13,7 +13,7 @@ internal sealed partial class QwenEngine
             Tokens = B(Capacity); Hidden = B(Capacity * 2048); Norm = B(Capacity * 2048); Projection = B(Capacity * 2048);
             Qkv = B(Capacity * 8192); Z = B(Capacity * 4096); A = B(Capacity * 32); this.B = B(Capacity * 32); Conv = B(Capacity * 8192);
             Q = B(Capacity * 4096); K = B(Capacity * 2048); V = B(Capacity * 512); Rotated = B(Capacity * 4096); Qgate = B(Capacity * 4096);
-            Scores = B(Capacity * 16 * engine.ContextWindow); Router = B(Capacity * 256); Ids = B(Capacity * 8); Rates = B(Capacity * 8);
+            Scores = B(ContextLimits.AttentionWorkspaceFloats); Router = B(Capacity * 256); Ids = B(Capacity * 8); Rates = B(Capacity * 8);
             Counts = B(256); Offsets = B(257); Tiles = B(512 * 4); TileCount = B(1); SortedTokens = B(Capacity * 8); Inverse = B(Capacity * 8);
             ExpertGate = B(Capacity * 8 * 512); ExpertUp = B(Capacity * 8 * 512); ExpertActivation = B(Capacity * 8 * 512); ExpertOutput = B(Capacity * 8 * 2048);
             SharedGate = B(Capacity * 512); SharedUp = B(Capacity * 512); SharedActivation = B(Capacity * 512); SharedOutput = B(Capacity * 2048); SharedWeight = B(Capacity);
@@ -30,6 +30,8 @@ internal sealed partial class QwenEngine
     {
         if (batch is null) { batch = new BatchBuffers(this); Console.Error.WriteLine("Batched FP32 prefill workspace ready; Metal buffer bytes=" + gpu.AllocatedBytes); }
         var b = batch; int count = tokens.Length; tokens.CopyTo(b.Tokens.Values<int>(count));
+        EnsureCacheCapacity(position + count);
+        if ((long)count * 16 * (position + count) > ContextLimits.AttentionWorkspaceFloats) throw new ArgumentException("Prefill tile exceeds attention workspace");
         gpu.Begin();
         gpu.Dispatch("batch_embedding", new() { M = (uint)count }, checked((uint)count * Hidden), 128, weights["model.language_model.embed_tokens.weight"].Binding, b.Tokens, b.Hidden);
         for (int layer = 0; layer < 40; layer++)
@@ -51,7 +53,7 @@ internal sealed partial class QwenEngine
                 BatchProject(path + ".q_proj", b.Norm, b.Qkv, count); BatchProject(path + ".k_proj", b.Norm, b.K, count); BatchProject(path + ".v_proj", b.Norm, b.V, count);
                 gpu.Dispatch("batch_split_q", new() { M = (uint)count }, checked((uint)count * 4096), 128, b.Qkv, b.Q, b.Qgate);
                 Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
-                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)Context, Theta = 10_000_000f };
+                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f };
                 gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
                 gpu.Dispatch2D("batch_attention_scores", p, checked((uint)(position + count) * 32), checked((uint)count * 16), 128, b.Rotated, keyCache[layer], b.Scores);
                 var normalization = p; normalization.Position = (uint)(position + count - 1);
