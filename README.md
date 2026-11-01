@@ -20,7 +20,7 @@ native 262144 tokens. `--context-window` can select a smaller window (1–262144
 KV storage starts at at most 4096 tokens and grows as positions are consumed;
 requesting a large output allowance does not reserve that whole allowance in memory.
 Prefill attention uses a 128 MiB score workspace and smaller tiles at long positions.
-Vision, MTP and speculation are excluded. Greedy text generation has thinking
+Vision and the target MTP head are excluded. Optional DFlash2 speculation is described below. Greedy text generation has thinking
 disabled. No OS memory/power limits are modified. All model files are external
 to Git and are checked against the manifest.
 
@@ -170,3 +170,56 @@ input, intermediate block hits, KV growth, EOS-policy changes and cancellation
 recovery. Exact-hit checks also compare every used KV entry, recurrent/conv state
 and final logits bit for bit. These implementation diagnostics are separate from
 official conformance and task-quality evaluations.
+
+## Optional DFlash2 decode (experimental)
+
+Pass `--draft-dir` to load `incoai/Qwen3.6-35B-A3B-DFlash2` at
+`51ef7b6923ad6c14cb1bb41c37a9041446496ab6`. Download `config.json` and
+`model.safetensors` from that exact revision; keep them outside Git. Startup checks
+both files against `draft-manifest.json`. The 1,052,513,456-byte draft checkpoint
+has SHA-256 `d1f16c0ff85afbe6166fabfae998af3ec16fa11da87da4391b5e0e0a7c796a4d`.
+
+```sh
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll serve --model-dir /path/to/target --draft-dir /path/to/draft --port 17863
+```
+
+The original .NET/Metal runtime executes the six-layer BF16 draft, sharing the
+unchanged target embedding and output head. Draft activations/KV, target KV,
+recurrent state and accumulation remain FP32; the official FP8 target is unchanged.
+The draft uses projected features from eight target layers, noncausal sliding
+attention, grouped dynamic causal convolutions and the learned top-16 candidate
+selector. Each round proposes up to seven tokens after a verified anchor. The
+target verifies the block, accepts its matching prefix, restores the corresponding
+recurrent/convolution state on GPU, and supplies a correction or bonus token.
+Only verified tokens reach the existing streaming callbacks. Request budgets,
+EOS, stop strings and cancellation still apply.
+
+Draft context is bounded by the checkpoint's 2048-token sliding window; this does
+not reduce the target's native context window. Prefix checkpoints additionally
+save the 16 MiB projected draft context. Restoring a prefix rebuilds draft KV from
+that context. The correctness-first verifier currently reserves about 503 MiB for
+per-row hybrid-state snapshots plus logits; draft weights and workspace add more
+memory. These allocations are in addition to growing target KV. No OS memory
+settings or weight precision are changed. Omit `--draft-dir` for serial decode.
+
+Development checks, separate from the pinned LLM Bootstrap evaluation:
+
+```sh
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll verification-self-test --model-dir /path/to/target
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll draft-self-test --model-dir /path/to/target --draft-dir /path/to/draft --output-dir /path/to/public-fixture
+python tests/draft_reference.py --model-dir /path/to/target --draft-dir /path/to/draft --fixture-dir /path/to/public-fixture
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll speculation-self-test --model-dir /path/to/target --draft-dir /path/to/draft
+```
+
+The independent CPU draft oracle requires NumPy and uses a deterministic synthetic
+feature fixture. Verification checks every retained prefix of 1/2/4/8-row blocks
+against executing just that prefix, including overwriting rejected KV. Generation
+checks compare fixed public prompts, cache reuse and early streaming termination.
+Matching finite fixtures does not prove universal bitwise equivalence between
+batched and serial FP32 paths: reduction ordering can change close logits. Official
+throughput and acceptance results must come from the frozen experiment evaluator.
+
+Architecture references: [DFlash2](https://inco.ai/blog/dflash2/),
+[reference model](https://github.com/z-lab/dflash), and
+[Splash](https://github.com/incoai/splash). Their published performance numbers
+use different configurations and are not measurements of this engine.

@@ -117,7 +117,7 @@ internal static class PrefixCacheSelfTest
         engine.BatchedPrefill = true;
         int[] mutable = (int[])simple.Clone(); Run(mutable); mutable[0] = engine.Tokenizer.EndOfText;
         Check(engine.CachedPrefixTokens(simple) == simple.Length && engine.CachedPrefixTokens(mutable) == 0, "token key owns its array");
-        Check(engine.PrefixCheckpointCount <= 4 && engine.PrefixCacheBytes <= 256UL * 1024 * 1024, "snapshot memory bounded");
+        Check(engine.PrefixCheckpointCount <= 4 && engine.PrefixCacheBytes <= (engine.DraftLoaded ? 320UL : 256UL) * 1024 * 1024, "snapshot memory bounded");
         Console.WriteLine(JsonSerializer.Serialize(new { passed = checks, cases, snapshot_bytes = engine.PrefixCacheBytes, metal_buffer_bytes = engine.AllocatedBytes }));
     }
 }
@@ -139,6 +139,9 @@ internal sealed partial class QwenEngine
                 Add(keyCache[layer], consumed * 512 * sizeof(float)); Add(valueCache[layer], consumed * 512 * sizeof(float));
             }
         Add(logits, Vocabulary * sizeof(float));
+        if (ActiveDraft is { } drafting)
+            for (int position = Math.Max(0, consumed - DFlashDraft.Window); position < consumed; position++)
+                hash.AppendData(drafting.Context.Values<byte>(Hidden * sizeof(float), (ulong)(position % DFlashDraft.Window) * Hidden * sizeof(float)));
         return Convert.ToHexStringLower(hash.GetHashAndReset());
     }
 }

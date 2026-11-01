@@ -38,6 +38,7 @@ void *boot_create(const char *source) { @autoreleasepool {
     return c;
 }}
 const char *boot_error(void *handle) { return ((Context*)handle)->error.c_str(); }
+void boot_profile(void *handle,int enabled) { Context *c=(Context*)handle; c->profile=enabled!=0; c->timings.clear(); }
 void boot_destroy(void *handle) {
     Context *c=(Context*)handle;
     if(c->profile)for(auto &entry:c->timings)fprintf(stderr,"GPU_DIAGNOSTIC %s count=%llu gpu_ms=%.6f\n",entry.first.c_str(),(unsigned long long)entry.second.second,entry.second.first*1000);

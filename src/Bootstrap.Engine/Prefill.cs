@@ -23,10 +23,15 @@ internal sealed partial class QwenEngine
     {
         var tensor = weights[name + ".weight"];
         var scales = tensor.Kind == 0 ? weights[name + ".weight_scale_inv"].Binding : (Binding)dummy;
+        if (count <= VerificationCapacity)
+        {
+            gpu.Dispatch("matrix_product_tiny", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, (uint)tensor.Shape[0] * 32, 128, input, tensor.Binding, scales, output);
+            return;
+        }
         bool small = tensor.Shape[0] <= 32;
         gpu.Dispatch2D(small ? "matrix_product_small" : "matrix_product", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, checked((uint)((tensor.Shape[0] + (small ? 31 : 63)) / (small ? 32 : 64) * (small ? 128 : 256))), checked((uint)((count + (small ? 15 : 31)) / (small ? 16 : 32))), small ? 128u : 256u, input, tensor.Binding, scales, output);
     }
-    int PrefillBlock(ReadOnlySpan<int> tokens, int position, bool output, bool ignoreEos)
+    int PrefillBlock(ReadOnlySpan<int> tokens, int position, bool output, bool ignoreEos, bool verify = false)
     {
         if (batch is null) { batch = new BatchBuffers(this); Console.Error.WriteLine("Batched FP32 prefill workspace ready; Metal buffer bytes=" + gpu.AllocatedBytes); }
         var b = batch; int count = tokens.Length; tokens.CopyTo(b.Tokens.Values<int>(count));
@@ -41,9 +46,9 @@ internal sealed partial class QwenEngine
             {
                 string path = prefix + ".linear_attn";
                 BatchProject(path + ".in_proj_qkv", b.Norm, b.Qkv, count); BatchProject(path + ".in_proj_z", b.Norm, b.Z, count); BatchProject(path + ".in_proj_a", b.Norm, b.A, count); BatchProject(path + ".in_proj_b", b.Norm, b.B, count);
-                gpu.Dispatch("batch_conv", new() { M = (uint)count }, 8192, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv);
+                gpu.Dispatch("batch_conv", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 8192, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv, verify ? verification!.Convolution[layer] : dummy);
                 gpu.Dispatch("batch_l2", new() { M = (uint)count }, checked((uint)count * 16 * 128), 128, b.Conv, b.Q, b.K);
-                gpu.Dispatch("batch_delta", new() { M = (uint)count }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, state[layer], b.Rotated);
+                gpu.Dispatch("batch_delta", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, state[layer], b.Rotated, verify ? verification!.State[layer] : dummy);
                 Normalize(b.Rotated, path + ".norm", b.Rotated, 128, checked((uint)count * 32), false, b.Z);
                 BatchProject(path + ".out_proj", b.Rotated, b.Projection, count);
             }
@@ -70,7 +75,7 @@ internal sealed partial class QwenEngine
             gpu.Dispatch("expert_group", new() { M = (uint)count }, 256, 128, b.Ids, b.Offsets, b.SortedTokens, b.Inverse);
             var raw = weights.Shard("layers-" + layer + ".safetensors");
             uint tileLimit = (uint)Math.Min(count * 8, (count * 8 + 15) / 16 + 256);
-            void ExpertProjection(uint choice, uint rows, uint columns, GpuBuffer input, GpuBuffer result) => gpu.Dispatch2D("expert_matrix", new() { N = rows, K = columns, Kind = choice }, ((rows + 63) / 64) * 256, tileLimit, 256, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
+            void ExpertProjection(uint choice, uint rows, uint columns, GpuBuffer input, GpuBuffer result) => gpu.Dispatch2D(count <= VerificationCapacity ? "expert_matrix_tiny" : "expert_matrix", new() { N = rows, K = columns, Kind = choice }, count <= VerificationCapacity ? rows * 32 : ((rows + 63) / 64) * 256, tileLimit, count <= VerificationCapacity ? 128u : 256u, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
             ExpertProjection(0, 512, Hidden, b.Norm, b.ExpertGate); ExpertProjection(1, 512, Hidden, b.Norm, b.ExpertUp);
             gpu.Dispatch("silu_product", new() { N = checked((uint)count * 8 * 512) }, checked((uint)count * 8 * 512), 128, b.ExpertGate, b.ExpertUp, b.ExpertActivation);
             ExpertProjection(2, Hidden, 512, b.ExpertActivation, b.ExpertOutput);
@@ -78,13 +83,24 @@ internal sealed partial class QwenEngine
             gpu.Dispatch("silu_product", new() { N = checked((uint)count * 512) }, checked((uint)count * 512), 128, b.SharedGate, b.SharedUp, b.SharedActivation);
             BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count); BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count);
             gpu.Dispatch("batch_mix", new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
+            ActiveDraft?.Capture(layer, b.Hidden, count);
         }
-        if (output)
+        if (!verify) ActiveDraft?.CommitFeatures(count, position);
+        if (verify)
+        {
+            var verificationBuffers = verification!;
+            Normalize(b.Hidden, "model.language_model.norm", b.Norm, Hidden, (uint)count);
+            BatchProject("lm_head", b.Norm, verificationBuffers.Logits, count);
+            for (int row = 0; row < count; row++)
+                gpu.Dispatch("argmax", new() { N = Vocabulary, Flags = ignoreEos ? 1u : 0u, A = (uint)Tokenizer.End, B = (uint)Tokenizer.EndOfText }, 256, 256,
+                    new Binding(verificationBuffers.Logits, (ulong)row * Vocabulary * 4), new Binding(verificationBuffers.Next, (ulong)row * 4));
+        }
+        else if (output)
         {
             gpu.Dispatch("rmsnorm", new() { N = Hidden, M = 1, Epsilon = 1e-6f, Flags = 1 }, 256, 256, new Binding(b.Hidden, checked((ulong)(count - 1) * Hidden * 4)), weights["model.language_model.norm.weight"].Binding, norm, dummy);
             Project("lm_head", norm, logits);
             SelectNext(ignoreEos);
         }
-        gpu.End(); return output ? next.Values<int>(1)[0] : -1;
+        gpu.End(); return output && !verify ? next.Values<int>(1)[0] : -1;
     }
 }

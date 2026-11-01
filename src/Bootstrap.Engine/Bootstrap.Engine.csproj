@@ -9,6 +9,7 @@
   <ItemGroup>
     <Content Include="../../native/kernels.metal" Link="kernels.metal" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../native/build/libbootstrap_metal.dylib" Link="libbootstrap_metal.dylib" CopyToOutputDirectory="PreserveNewest" />
+    <Content Update="draft-manifest.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Update="model-manifest.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <Target Name="BuildNativeBridge" BeforeTargets="PrepareForBuild" Inputs="../../native/bridge.mm" Outputs="../../native/build/libbootstrap_metal.dylib">

@@ -1,0 +1,11 @@
+{
+  "repository": "incoai/Qwen3.6-35B-A3B-DFlash2",
+  "revision": "51ef7b6923ad6c14cb1bb41c37a9041446496ab6",
+  "config_sha256": "86d2e8e57e7c70bb867240708d00c0535ae9ed3c828dbdcb21584471c7bbce59",
+  "files": [
+    {
+      "name": "model.safetensors",
+      "sha256": "d1f16c0ff85afbe6166fabfae998af3ec16fa11da87da4391b5e0e0a7c796a4d"
+    }
+  ]
+}

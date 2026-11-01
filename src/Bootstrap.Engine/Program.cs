@@ -12,16 +12,21 @@ string? Option(string name)
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
 if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
-if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "profile-decode" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test")
+    if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "profile-decode" or "speculation-self-test")
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
         using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow);
+        if (Option("--draft-dir") is { } draftDirectory) engine.LoadDraft(draftDirectory, Path.Combine(AppContext.BaseDirectory, "draft-manifest.json"));
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
         engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
+        if (command == "speculation-self-test") { engine.SpeculationSelfTest(); return; }
+        if (command == "profile-decode") { engine.ProfileDecode(); return; }
+        if (command == "draft-self-test") { engine.DraftSelfTest(Option("--output-dir") ?? throw new ArgumentException("--output-dir is required"), int.Parse(Option("--fixture-context") ?? "16")); return; }
+        if (command == "verification-self-test") { engine.VerificationSelfTest(); return; }
         if (command == "prefix-cache-self-test") { PrefixCacheSelfTest.Run(engine); return; }
         if (command == "context-self-test")
         {
@@ -52,7 +57,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "context-self-test"
         var inputTokens = engine.Tokenizer.SimpleChat(prompt);
         Console.Error.WriteLine($"Model ready; {engine.AllocatedBytes} Metal buffer bytes; {inputTokens.Length} prompt tokens");
         var result = engine.Generate(inputTokens, int.Parse(Option("--max-tokens") ?? int.MaxValue.ToString()), args.Contains("--ignore-eos"), piece => { Console.Error.Write(piece); return true; });
-        Console.Error.WriteLine(); Console.WriteLine(JsonSerializer.Serialize(result));
+        Console.Error.WriteLine(); Console.Error.WriteLine(JsonSerializer.Serialize(engine.LastSpeculationStats)); Console.WriteLine(JsonSerializer.Serialize(result));
     }
     else
     {
@@ -135,6 +140,29 @@ if (command == "kernel-self-test")
         float actual = matrixY.Values<float>(matrixRows * matrixColumns)[r * matrixColumns + c];
         if (Math.Abs(actual - expected) > .002) throw new Exception($"Batched FP8 projection mismatch row={r} col={c}: {actual} != {expected}");
         checks++;
+    }
+    foreach (int tinyRows in new[] { 1, 2, 3, 4, 7, 8 }) foreach (uint kind in new[] { 0u, 1u })
+    {
+        device.Begin(); device.Dispatch("matrix_product_tiny", new() { N = rows, M = (uint)tinyRows, K = cols, Kind = kind }, rows * 32, 128, matrixX, kind == 0 ? w : bfWeights, scales, matrixY); device.End();
+        for (int r = 0; r < tinyRows; r++) for (int c = 0; c < rows; c++)
+        {
+            double expected = 0;
+            for (int j = 0; j < cols; j++)
+            {
+                double weight;
+                if (kind == 1) weight = BitConverter.UInt32BitsToSingle((uint)bfWeights.Values<ushort>(rows * cols)[c * cols + j] << 16);
+                else
+                {
+                    int bits = w.Values<byte>(rows * cols)[c * cols + j], exponent = (bits >> 3) & 15, mantissa = bits & 7;
+                    weight = exponent == 0 ? mantissa / 512.0 : (1 + mantissa / 8.0) * Math.Pow(2, exponent - 7);
+                    if ((bits & 128) != 0) weight = -weight;
+                    weight *= j < 128 ? 1 : .5;
+                }
+                expected += weight * matrixX.Values<float>(matrixRows * cols)[r * cols + j];
+            }
+            if (Math.Abs(matrixY.Values<float>(tinyRows * rows)[r * rows + c] - expected) > (kind == 0 ? .002 : .00001)) throw new Exception($"Tiny matrix reference mismatch: rows={tinyRows}, kind={kind}, row={r}, column={c}");
+            checks++;
+        }
     }
     const int routeTokens = 5;
     using var routeX = device.Allocate(routeTokens * 256 * 4); using var routeIds = device.Allocate(routeTokens * 8 * 4); using var routeProb = device.Allocate(routeTokens * 8 * 4);

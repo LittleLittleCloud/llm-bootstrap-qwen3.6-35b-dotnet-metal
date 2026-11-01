@@ -34,6 +34,7 @@ internal static unsafe class Native
     [DllImport("bootstrap_metal", EntryPoint = "boot_begin")] internal static extern int Begin(nint context);
     [DllImport("bootstrap_metal", EntryPoint = "boot_clear")] internal static extern int Clear(nint context, nint buffer);
     [DllImport("bootstrap_metal", EntryPoint = "boot_dispatch")] internal static extern int Dispatch(nint context, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, nint* buffers, ulong* offsets, int count, in KernelArgs parameters, int parameterBytes, uint x, uint y, uint z, uint tx, uint ty, uint tz);
+    [DllImport("bootstrap_metal", EntryPoint = "boot_profile")] internal static extern void Profile(nint context, int enabled);
     [DllImport("bootstrap_metal", EntryPoint = "boot_end")] internal static extern int End(nint context);
 }
 
@@ -75,6 +76,7 @@ internal sealed unsafe class Metal : IDisposable
         if (handle == 0) Check(0);
         return new(handle, (ulong)new FileInfo(path).Length);
     }
+    public void SetProfiling(bool enabled) => Native.Profile(Handle, enabled ? 1 : 0);
     public void Begin() => Check(Native.Begin(Handle));
     public void Clear(GpuBuffer buffer) => Check(Native.Clear(Handle, buffer.Handle));
     public void End() => Check(Native.End(Handle));

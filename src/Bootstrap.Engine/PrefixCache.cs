@@ -7,7 +7,7 @@ internal sealed partial class QwenEngine
     // Snapshots are CPU-owned arrays: they never bind to a Metal command buffer.
     const int PrefixCheckpointLimit = 4, PrefixCheckpointInterval = 4096;
     const int RecurrentFloats = 32 * 128 * 128, ConvolutionFloats = 3 * 8192;
-    const int SnapshotFloats = 30 * (RecurrentFloats + ConvolutionFloats) + Vocabulary;
+    int SnapshotFloats => 30 * (RecurrentFloats + ConvolutionFloats) + Vocabulary + (draft is null ? 0 : DFlashDraft.ContextFloats);
     sealed record PrefixCheckpoint(int Position, float[] Data);
     readonly List<PrefixCheckpoint> prefixCheckpoints = new();
     readonly Stack<float[]> sparePrefixBuffers = new();
@@ -24,7 +24,7 @@ internal sealed partial class QwenEngine
         set { if (batchedPrefill != value) ClearPrefixCache(); batchedPrefill = value; }
     }
     public int PrefixCheckpointCount => prefixCheckpoints.Count;
-    public ulong PrefixCacheBytes => (ulong)(prefixCheckpoints.Count + sparePrefixBuffers.Count) * SnapshotFloats * sizeof(float);
+    public ulong PrefixCacheBytes => (ulong)(prefixCheckpoints.Count + sparePrefixBuffers.Count) * (ulong)SnapshotFloats * sizeof(float);
 
     public void ClearPrefixCache()
     {
@@ -60,6 +60,11 @@ internal sealed partial class QwenEngine
             data.Slice(offset, RecurrentFloats).CopyTo(state[layer].Values<float>(RecurrentFloats)); offset += RecurrentFloats;
             data.Slice(offset, ConvolutionFloats).CopyTo(convolution[layer].Values<float>(ConvolutionFloats)); offset += ConvolutionFloats;
         }
+        if (draft is not null)
+        {
+            data.Slice(offset + Vocabulary, DFlashDraft.ContextFloats).CopyTo(draft.Context.Values<float>(DFlashDraft.ContextFloats));
+            draft.Reset(checkpoint.Position);
+        }
         // End() waits for completion; CPU copies occur only between GPU submissions.
         // Positions at/after the checkpoint need no clear: attention is causal and
         // every newly consumed position is overwritten before it is read.
@@ -94,6 +99,7 @@ internal sealed partial class QwenEngine
             convolution[layer].Values<float>(ConvolutionFloats).CopyTo(data.Slice(offset, ConvolutionFloats)); offset += ConvolutionFloats;
         }
         logits.Values<float>(Vocabulary).CopyTo(data.Slice(offset, Vocabulary));
+        if (draft is not null) draft.Context.Values<float>(DFlashDraft.ContextFloats).CopyTo(data.Slice(offset + Vocabulary, DFlashDraft.ContextFloats));
         prefixCheckpoints.Add(new(position, storage));
     }
 
