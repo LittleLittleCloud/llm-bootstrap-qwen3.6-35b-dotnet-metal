@@ -58,6 +58,36 @@ internal sealed partial class QwenEngine
     void CopyFloats(Binding source, Binding destination, int count) =>
         gpu.Dispatch("copy_floats", new() { N = (uint)count }, (uint)count, 128, source, destination);
 
+    public void SpeculationSelfTest()
+    {
+        if (draft is null) throw new InvalidOperationException("--draft-dir is required");
+        string[] fixtures = [
+            "Write a Python function that returns the sum of squares of a list of integers. Explain the function and give three examples.",
+            "Write a Python function to merge two sorted lists, with a docstring and tests."
+        ];
+        var cases = new List<object>();
+        foreach (string fixture in fixtures)
+        {
+            int[] prompt = Tokenizer.SimpleChat(fixture);
+            SpeculativeDecoding = false; Reset();
+            Generate(prompt, 8, true);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var baseline = Generate(prompt, 128, true); double baselineMs = watch.Elapsed.TotalMilliseconds;
+            SpeculativeDecoding = true; Reset();
+            Generate(prompt, 8, true);
+            watch.Restart(); var candidate = Generate(prompt, 128, true); double candidateMs = watch.Elapsed.TotalMilliseconds;
+            var statistics = LastSpeculationStats;
+            watch.Restart(); var cached = Generate(prompt, 128, true); double cachedMs = watch.Elapsed.TotalMilliseconds;
+            if (!candidate.Tokens.SequenceEqual(cached.Tokens)) throw new Exception("Draft prefix restore changed output");
+            int firstMismatch = Enumerable.Range(0, Math.Min(baseline.Tokens.Length, candidate.Tokens.Length)).FirstOrDefault(i => baseline.Tokens[i] != candidate.Tokens[i], -1);
+            cases.Add(new { prompt_tokens = prompt.Length, generated_tokens = candidate.Tokens.Length, baseline_ms = baselineMs, speculative_ms = candidateMs, repeat_ms = cachedMs, first_mismatch = firstMismatch, cached_tokens = cached.CachedTokens, speculation = statistics });
+            int pieces = 0; Generate(prompt, 128, true, _ => ++pieces < 3);
+            var afterStop = Generate(prompt, 128, true);
+            if (!candidate.Tokens.SequenceEqual(afterStop.Tokens)) throw new Exception("Early streaming stop corrupted draft prefix restore");
+        }
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { development_only = true, cases, stream_stop_and_prefix_restore = "passed", metal_buffer_bytes = AllocatedBytes }));
+    }
+
     public void ProfileDecode()
     {
         gpu.SetProfiling(false);
