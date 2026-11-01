@@ -1,0 +1,158 @@
+using System.Security.Cryptography;
+using System.Text.Json;
+
+namespace Bootstrap.Engine;
+
+internal sealed partial class QwenEngine
+{
+    DFlashDraft? draft;
+    bool speculativeDecoding = true;
+    public bool SpeculativeDecoding
+    {
+        get => speculativeDecoding;
+        set { if (speculativeDecoding != value) ClearPrefixCache(); speculativeDecoding = value; }
+    }
+    DFlashDraft? ActiveDraft => SpeculativeDecoding ? draft : null;
+    public object? LastSpeculationStats { get; private set; }
+    public void LoadDraft(string directory, string manifest)
+    {
+        if (draft is not null) throw new InvalidOperationException("Draft already loaded");
+        ClearPrefixCache(); sparePrefixBuffers.Clear();
+        draft = new DFlashDraft(this, directory, manifest);
+    }
+
+    public void DraftSelfTest(string directory)
+    {
+        if (draft is null) throw new InvalidOperationException("--draft-dir is required");
+        Directory.CreateDirectory(directory);
+        draft.ExportSyntheticFixture(directory);
+    }
+
+    // All draft weights stay BF16; activations and KV stay FP32. The target
+    // embedding and output head are shared, without another copy or quantization.
+    sealed class DFlashDraft : IDisposable
+    {
+        public const int Window = 2048, ContextFloats = Window * Hidden;
+        static readonly int[] FeatureLayers = [1, 6, 11, 16, 22, 27, 32, 37];
+        readonly QwenEngine e;
+        readonly Checkpoint weights;
+        public readonly GpuBuffer Context;
+        readonly GpuBuffer features, projected, contextInput, contextK, contextV;
+        readonly GpuBuffer hidden, norm, prepared, dynamic, output, q, k, v, attention, scores, gate, up, activation, logits, selector, tokens, proposals;
+        readonly GpuBuffer[] keys = new GpuBuffer[6], values = new GpuBuffer[6];
+        int contextEnd, cachedThrough;
+        public DFlashDraft(QwenEngine engine, string directory, string manifest)
+        {
+            e = engine;
+            using var metadata = JsonDocument.Parse(File.ReadAllBytes(manifest));
+            if (Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(directory, "config.json")))) != metadata.RootElement.GetProperty("config_sha256").GetString())
+                throw new InvalidDataException("Draft config hash mismatch");
+            weights = new Checkpoint(e.gpu, directory, manifest);
+            GpuBuffer B(int count) => e.Buffer(count);
+            Context = B(ContextFloats); features = B(512 * Hidden * 8); projected = B(512 * Hidden);
+            contextInput = B(512 * Hidden); contextK = B(512 * 1024); contextV = B(512 * 1024);
+            hidden = B(8 * Hidden); norm = B(8 * Hidden); prepared = B(8 * Hidden); dynamic = B(8 * 512); output = B(8 * Hidden);
+            q = B(8 * 4096); k = B(8 * 1024); v = B(8 * 1024); attention = B(8 * 4096); scores = B(8 * 32 * (Window + 8));
+            gate = B(8 * 6144); up = B(8 * 6144); activation = B(8 * 6144); logits = B(8 * Vocabulary); selector = B(8 * 256); tokens = B(8); proposals = B(8);
+            for (int l = 0; l < 6; l++) { keys[l] = B(Window * 1024); values[l] = B(Window * 1024); }
+        }
+        public void Reset(int position = 0) { contextEnd = position; cachedThrough = Math.Max(0, position - Window); }
+        public void Capture(int layer, GpuBuffer source, int count)
+        {
+            int feature = Array.IndexOf(FeatureLayers, layer);
+            if (feature < 0) return;
+            e.gpu.Dispatch("draft_capture", new() { M = (uint)count, A = (uint)feature }, (uint)(count * Hidden), 128, source, features);
+        }
+        public void CommitFeatures(int count, int position)
+        {
+            Project("fc", features, projected, count);
+            Normalize("hidden_norm", projected, projected, Hidden, count);
+            e.gpu.Dispatch("draft_context_store", new() { M = (uint)count, Position = (uint)position }, (uint)(count * Hidden), 128, projected, Context);
+            contextEnd = position + count;
+        }
+        void Project(string name, GpuBuffer input, GpuBuffer destination, int count)
+        {
+            var tensor = weights[name + ".weight"];
+            if (tensor.Dtype != "BF16") throw new InvalidDataException("Draft projections must remain BF16");
+            e.gpu.Dispatch2D("matrix_product", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = 1 }, (uint)((tensor.Shape[0] + 63) / 64 * 256), (uint)((count + 31) / 32), 256, input, tensor.Binding, e.dummy, destination);
+        }
+        void Normalize(string name, GpuBuffer input, GpuBuffer destination, int size, int rows)
+        {
+            e.gpu.Dispatch("rmsnorm", new() { N = (uint)size, M = (uint)rows, Epsilon = 1e-6f }, (uint)(rows * 256), 256, input, weights[name + ".weight"].Binding, destination, e.dummy);
+        }
+        void Convolve(string name, GpuBuffer input, GpuBuffer destination, int count, bool finish)
+        {
+            if (!finish) Project(name + ".kernel_projection", input, dynamic, count);
+            e.gpu.Dispatch("draft_dynamic_conv", new() { M = (uint)count, A = finish ? 1u : 0u }, (uint)(count * Hidden), 128, input, dynamic, weights[name + ".base_kernel"].Binding, destination);
+        }
+        void UpdateContext(int layer)
+        {
+            string path = $"layers.{layer}.self_attn";
+            for (int start = Math.Max(cachedThrough, Math.Max(0, contextEnd - Window)); start < contextEnd; start += 512)
+            {
+                int count = Math.Min(512, contextEnd - start);
+                e.gpu.Dispatch("draft_context_load", new() { M = (uint)count, Position = (uint)start }, (uint)(count * Hidden), 128, Context, contextInput);
+                Project(path + ".k_proj", contextInput, contextK, count); Project(path + ".v_proj", contextInput, contextV, count);
+                Normalize(path + ".k_norm", contextK, contextK, 128, count * 8);
+                e.gpu.Dispatch("draft_context_kv", new() { M = (uint)count, Position = (uint)start, Theta = 10_000_000f }, (uint)(count * 1024), 128, contextK, contextV, keys[layer], values[layer]);
+            }
+        }
+        public int[] Propose(int anchor, int position, int count)
+        {
+            if (position != contextEnd || count is < 2 or > 8) throw new InvalidOperationException("Draft context/position mismatch");
+            var tokenValues = tokens.Values<int>(count); tokenValues.Fill(248077); tokenValues[0] = anchor;
+            e.gpu.Begin();
+            e.gpu.Dispatch("batch_embedding", new() { M = (uint)count }, (uint)(count * Hidden), 128, e.weights["model.language_model.embed_tokens.weight"].Binding, tokens, hidden);
+            for (int layer = 0; layer < 6; layer++)
+            {
+                string path = $"layers.{layer}";
+                UpdateContext(layer);
+                Normalize(path + ".input_layernorm", hidden, norm, Hidden, count);
+                Convolve(path + ".attention_conv", norm, prepared, count, false);
+                Project(path + ".self_attn.q_proj", prepared, q, count); Project(path + ".self_attn.k_proj", prepared, k, count); Project(path + ".self_attn.v_proj", prepared, v, count);
+                Normalize(path + ".self_attn.q_norm", q, q, 128, count * 32); Normalize(path + ".self_attn.k_norm", k, k, 128, count * 8);
+                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = Window + 8, Theta = 10_000_000f };
+                e.gpu.Dispatch("draft_rotate", p, (uint)(count * 2048), 128, q, k);
+                e.gpu.Dispatch("draft_attention_scores", p, (uint)(count * 32 * (Window + 8) * 32), 128, q, k, keys[layer], scores);
+                var softmax = p; softmax.Position = Window + 7;
+                e.gpu.Dispatch("attention_softmax", softmax, (uint)(count * 32 * 256), 256, scores);
+                e.gpu.Dispatch("draft_attention_values", p, (uint)(count * 4096), 128, scores, v, values[layer], attention);
+                Project(path + ".self_attn.o_proj", attention, output, count);
+                Convolve(path + ".attention_conv", output, prepared, count, true);
+                Add(hidden, prepared, count);
+                Normalize(path + ".post_attention_layernorm", hidden, norm, Hidden, count);
+                Convolve(path + ".mlp_conv", norm, prepared, count, false);
+                Project(path + ".mlp.gate_proj", prepared, gate, count); Project(path + ".mlp.up_proj", prepared, up, count);
+                e.gpu.Dispatch("silu_product", new() { N = (uint)(count * 6144) }, (uint)(count * 6144), 128, gate, up, activation);
+                Project(path + ".mlp.down_proj", activation, output, count);
+                Convolve(path + ".mlp_conv", output, prepared, count, true); Add(hidden, prepared, count);
+            }
+            Normalize("norm", hidden, norm, Hidden, count);
+            e.BatchProject("lm_head", norm, logits, count);
+            Project("candidate_selector.hidden_projection", norm, selector, count);
+            e.gpu.Dispatch("draft_select", new() { M = (uint)count, Position = (uint)anchor, N = Vocabulary }, 256, 256, logits, selector, weights["candidate_selector.predecessor_codebook"].Binding, weights["candidate_selector.successor_codebook"].Binding, proposals);
+            e.gpu.End(); cachedThrough = position;
+            return proposals.Values<int>(count - 1).ToArray();
+        }
+        void Add(GpuBuffer residual, GpuBuffer update, int count) => e.gpu.Dispatch("add", new() { N = (uint)(count * Hidden) }, (uint)(count * Hidden), 128, residual, update, residual);
+        public void ExportSyntheticFixture(string directory)
+        {
+            Reset();
+            const int context = 16, width = 8, anchor = 1234;
+            var data = features.Values<float>(context * Hidden * 8);
+            for (int i = 0; i < data.Length; i++) data[i] = ((i * 13 % 2001) - 1000) * 0.001f;
+            e.gpu.Begin(); CommitFeatures(context, 0); e.gpu.End();
+            int[] first = Propose(anchor, context, width);
+            float[] hiddenOutput = norm.Values<float>(width * Hidden).ToArray();
+            int[] cached = Propose(anchor, context, width);
+            if (!first.SequenceEqual(cached) || !hiddenOutput.SequenceEqual(norm.Values<float>(width * Hidden).ToArray()))
+                throw new Exception("Draft context-KV reuse changed output");
+            void Write(string name, ReadOnlySpan<float> values) => File.WriteAllBytes(Path.Combine(directory, name), System.Runtime.InteropServices.MemoryMarshal.AsBytes(values).ToArray());
+            Write("draft-hidden.f32", hiddenOutput);
+            Write("draft-context.f32", Context.Values<float>(context * Hidden));
+            File.WriteAllText(Path.Combine(directory, "draft-fixture.json"), JsonSerializer.Serialize(new { context, width, anchor, proposals = first, context_kv_reuse_bitwise = true }));
+            Console.WriteLine(JsonSerializer.Serialize(new { draft_fixture = directory, proposals = first, context_kv_reuse_bitwise = true }));
+        }
+        public void Dispose() => weights.Dispose();
+    }
+}

@@ -186,17 +186,17 @@ kernel void expert_matrix(device const float*x [[buffer(0)]],device const uchar*
 kernel void batch_mix(device const float*residual [[buffer(0)]],device const float*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*2048)return;uint token=i/2048,d=i%2048;float value=residual[i]+shared[i]*sigmoid(gate[token]);for(uint e=0;e<8;++e)value+=prob[token*8+e]*expert[inverse[token*8+e]*2048+d];y[i]=value;
 }
-kernel void batch_conv(device const float*x [[buffer(0)]],device const ushort*w [[buffer(1)]],device float*state [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+kernel void batch_conv(device const float*x [[buffer(0)]],device const ushort*w [[buffer(1)]],device float*state [[buffer(2)]],device float*y [[buffer(3)]],device float*tape [[buffer(4)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=8192)return;float s0=state[i],s1=state[8192+i],s2=state[16384+i],w0=bf(w[i*4]),w1=bf(w[i*4+1]),w2=bf(w[i*4+2]),w3=bf(w[i*4+3]);
-    for(uint t=0;t<p.m;++t){float value=x[t*8192+i];y[t*8192+i]=silu(s0*w0+s1*w1+s2*w2+value*w3);s0=s1;s1=s2;s2=value;}state[i]=s0;state[8192+i]=s1;state[16384+i]=s2;
+    for(uint t=0;t<p.m;++t){float value=x[t*8192+i];y[t*8192+i]=silu(s0*w0+s1*w1+s2*w2+value*w3);s0=s1;s1=s2;s2=value;if(p.flags&1){tape[t*24576+i]=s0;tape[t*24576+8192+i]=s1;tape[t*24576+16384+i]=s2;}}state[i]=s0;state[8192+i]=s1;state[16384+i]=s2;
 }
 kernel void batch_l2(device const float*x [[buffer(0)]],device float*q [[buffer(1)]],device float*k [[buffer(2)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint group [[threadgroup_position_in_grid]]) {
     uint token=group/16,head=group%16,j=head*128+tid;threadgroup float qs[4],ks[4];threadgroup float qi,ki;float a=x[token*8192+j],b=x[token*8192+2048+j];float qa=simd_sum(a*a),ka=simd_sum(b*b);
     if((tid&31)==0){qs[tid/32]=qa;ks[tid/32]=ka;}threadgroup_barrier(mem_flags::mem_threadgroup);qa=simd_sum(tid<4?qs[tid]:0);ka=simd_sum(tid<4?ks[tid]:0);if(tid==0){qi=rsqrt(qa+1e-6f)*rsqrt(128.0f);ki=rsqrt(ka+1e-6f);}threadgroup_barrier(mem_flags::mem_threadgroup);q[token*2048+j]=a*qi;k[token*2048+j]=b*ki;
 }
-kernel void batch_delta(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*v [[buffer(2)]],device const float*a [[buffer(3)]],device const float*b [[buffer(4)]],device const ushort*alog [[buffer(5)]],device const ushort*dt [[buffer(6)]],device float*state [[buffer(7)]],device float*y [[buffer(8)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+kernel void batch_delta(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*v [[buffer(2)]],device const float*a [[buffer(3)]],device const float*b [[buffer(4)]],device const ushort*alog [[buffer(5)]],device const ushort*dt [[buffer(6)]],device float*state [[buffer(7)]],device float*y [[buffer(8)]],device float*tape [[buffer(9)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
     uint row=g/32,h=row/128,d=row%128;if(h>=32)return;uint base=(h*128+d)*128+lane,kh=h/2;float4 cell=float4(state[base],state[base+32],state[base+64],state[base+96]);float gain=exp(bf(alog[h])),bias=bf(dt[h]);
-    for(uint t=0;t<p.m;++t){uint key=t*2048+kh*128+lane;float4 kv=float4(k[key],k[key+32],k[key+64],k[key+96]),qv=float4(q[key],q[key+32],q[key+64],q[key+96]);cell*=exp(-gain*softplus(a[t*32+h]+bias));float prediction=simd_sum(dot(cell,kv)),correction=sigmoid(b[t*32+h])*(v[t*8192+4096+h*128+d]-prediction);cell+=correction*kv;float value=simd_sum(dot(cell,qv));if(lane==0)y[t*4096+h*128+d]=value;}
+    for(uint t=0;t<p.m;++t){uint key=t*2048+kh*128+lane;float4 kv=float4(k[key],k[key+32],k[key+64],k[key+96]),qv=float4(q[key],q[key+32],q[key+64],q[key+96]);cell*=exp(-gain*softplus(a[t*32+h]+bias));float prediction=simd_sum(dot(cell,kv)),correction=sigmoid(b[t*32+h])*(v[t*8192+4096+h*128+d]-prediction);cell+=correction*kv;float value=simd_sum(dot(cell,qv));if(lane==0)y[t*4096+h*128+d]=value;if(p.flags&1){uint at=t*524288+base;tape[at]=cell.x;tape[at+32]=cell.y;tape[at+64]=cell.z;tape[at+96]=cell.w;}}
     state[base]=cell.x;state[base+32]=cell.y;state[base+64]=cell.z;state[base+96]=cell.w;
 }
 kernel void batch_split_q(device const float*x [[buffer(0)]],device float*q [[buffer(1)]],device float*gate [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.m*4096){uint token=i/4096,h=(i%4096)/256,d=i%256;q[i]=x[token*8192+h*512+d];gate[i]=x[token*8192+h*512+256+d];}}
@@ -208,4 +208,69 @@ kernel void batch_attention_scores(device const float*q [[buffer(0)]],device con
 }
 kernel void batch_attention_values(device const float*scores [[buffer(0)]],device const float*v [[buffer(1)]],device const float*gate [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*4096)return;uint token=i/4096,h=(i%4096)/256,d=i%256;float sum=0;for(uint t=0;t<=p.pos+token;++t)sum+=scores[(token*16+h)*p.k+t]*v[(t*2+h/8)*256+d];y[i]=sum*sigmoid(gate[i]);
+}
+
+// Copies also support Binding byte offsets for accepted-row state commits.
+kernel void copy_floats(device const float*x [[buffer(0)]],device float*y [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) { if(i<p.n)y[i]=x[i]; }
+
+// DFlash2: concatenate post-layer target features, then retain projected context.
+kernel void draft_capture(device const float*x [[buffer(0)]],device float*y [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i<p.m*2048)y[(i/2048)*16384+p.a*2048+i%2048]=x[i];
+}
+kernel void draft_context_store(device const float*x [[buffer(0)]],device float*y [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i<p.m*2048)y[((p.pos+i/2048)%2048)*2048+i%2048]=x[i];
+}
+kernel void draft_context_load(device const float*x [[buffer(0)]],device float*y [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i<p.m*2048)y[i]=x[((p.pos+i/2048)%2048)*2048+i%2048];
+}
+kernel void draft_dynamic_conv(device const float*x [[buffer(0)]],device const float*dynamic [[buffer(1)]],device const ushort*base [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i>=p.m*2048)return;uint row=i/2048,d=i%2048,group=d/16;float sum=0;
+    for(uint offset=0;offset<2;++offset)if(row>=offset){float value=x[(row-offset)*2048+d];sum+=bf(base[(p.a*2+offset)*2048+d])*value;sum+=dynamic[row*512+p.a*256+offset*128+group]*value;}
+    y[i]=sum;
+}
+inline float draft_rotated(device const float*x,uint d,uint pos,float theta) {
+    uint j=d%128,base=d-j;float angle=float(pos)*pow(theta,-float(j%64)/64.0f),c=cos(angle),s=sin(angle);
+    return x[d]*c+(j<64?-x[base+j+64]:x[base+j-64])*s;
+}
+kernel void draft_context_kv(device const float*k [[buffer(0)]],device const float*v [[buffer(1)]],device float*kc [[buffer(2)]],device float*vc [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i>=p.m*1024)return;uint row=i/1024,d=i%1024,at=((p.pos+row)%2048)*1024+d;
+    kc[at]=draft_rotated(k+row*1024,d,p.pos+row,p.theta);vc[at]=v[i];
+}
+// Each thread owns a complete rotary pair, making this in-place update race-free.
+kernel void draft_rotate(device float*q [[buffer(0)]],device float*k [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i>=p.m*2048)return;uint row=i/2048,pair=i%2048,head=pair/64,d=pair%64,at=row*4096+head*128+d;
+    float angle=float(p.pos+row)*pow(p.theta,-float(d)/64.0f),c=cos(angle),s=sin(angle),a=q[at],b=q[at+64];q[at]=a*c-b*s;q[at+64]=b*c+a*s;
+    if(pair<512){at=row*1024+head*128+d;a=k[at];b=k[at+64];k[at]=a*c-b*s;k[at+64]=b*c+a*s;}
+}
+kernel void draft_attention_scores(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*kc [[buffer(2)]],device float*scores [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+    uint index=i/32,slot=index%p.k,h=(index/p.k)%32,row=index/(p.k*32);if(row>=p.m)return;
+    uint start=p.pos>2048?p.pos-2048:0,t=start+slot;bool context=slot<2048,valid=context?(t<p.pos && p.pos+row-t<2048):(slot-2048<p.m);
+    float sum=0;if(valid){uint at=context?((t%2048)*8+h/4)*128:((slot-2048)*8+h/4)*128;device const float*key=context?kc:k;for(uint d=lane;d<128;d+=32)sum+=q[(row*32+h)*128+d]*key[at+d];}
+    sum=simd_sum(sum);if(lane==0)scores[index]=valid?sum*rsqrt(128.0f):-INFINITY;
+}
+kernel void draft_attention_values(device const float*scores [[buffer(0)]],device const float*v [[buffer(1)]],device const float*vc [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i>=p.m*4096)return;uint row=i/4096,h=(i%4096)/128,d=i%128,start=p.pos>2048?p.pos-2048:0;float sum=0;
+    for(uint t=start;t<p.pos;++t)sum+=scores[(row*32+h)*p.k+t-start]*vc[((t%2048)*8+h/4)*128+d];
+    for(uint t=0;t<p.m;++t)sum+=scores[(row*32+h)*p.k+2048+t]*v[(t*8+h/4)*128+d];y[i]=sum;
+}
+// Greedy top-16 unary shortlist followed by the learned predecessor/successor
+// compatibility score. Anchor + selected predecessors form the candidate path.
+kernel void draft_select(device const float*logits [[buffer(0)]],device const float*hidden [[buffer(1)]],device const ushort*pre [[buffer(2)]],device const ushort*post [[buffer(3)]],device int*out [[buffer(4)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float partial[8],unary[16],compat[16];threadgroup uint indices[8],candidates[16],predecessor;
+    if(tid==0)predecessor=p.pos;threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint row=1;row<p.m;++row){
+        float best[16];uint ids[16];for(uint j=0;j<16;++j){best[j]=-INFINITY;ids[j]=0xffffffff;}
+        for(uint token=tid;token<p.n;token+=256){float value=logits[row*p.n+token];if(value<best[15]||(value==best[15]&&token>=ids[15]))continue;uint at=15;while(at>0&&(value>best[at-1]||(value==best[at-1]&&token<ids[at-1]))){best[at]=best[at-1];ids[at]=ids[at-1];--at;}best[at]=value;ids[at]=token;}
+        for(uint choice=0;choice<16;++choice){
+            float top=simd_max(best[0]);uint index=simd_min(best[0]==top?ids[0]:0xffffffff);
+            if((tid&31)==0){partial[tid/32]=top;indices[tid/32]=index;}threadgroup_barrier(mem_flags::mem_threadgroup);
+            float value=tid<8?partial[tid]:-INFINITY;uint id=tid<8?indices[tid]:0xffffffff;top=simd_max(value);index=simd_min(value==top?id:0xffffffff);
+            if(tid==0){unary[choice]=top;candidates[choice]=index;}threadgroup_barrier(mem_flags::mem_threadgroup);
+            if(ids[0]==candidates[choice]){for(uint j=0;j<15;++j){best[j]=best[j+1];ids[j]=ids[j+1];}best[15]=-INFINITY;ids[15]=0xffffffff;}
+        }
+        // One SIMD group per candidate, two waves for 16 candidates.
+        for(uint wave=0;wave<2;++wave){uint choice=wave*8+tid/32;float sum=0;for(uint d=tid%32;d<256;d+=32)sum+=bf(pre[predecessor*256+d])*hidden[row*256+d]*bf(post[candidates[choice]*256+d]);sum=simd_sum(sum);if((tid&31)==0)compat[choice]=unary[choice]+sum;}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if(tid==0){uint winner=0;for(uint j=1;j<16;++j)if(compat[j]>compat[winner]||(compat[j]==compat[winner]&&candidates[j]<candidates[winner]))winner=j;predecessor=candidates[winner];out[row-1]=int(predecessor);}threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
 }

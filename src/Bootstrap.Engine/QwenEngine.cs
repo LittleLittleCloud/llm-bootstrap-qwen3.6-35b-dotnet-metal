@@ -94,6 +94,8 @@ internal sealed partial class QwenEngine : IDisposable
     public void Reset()
     {
         ClearPrefixCache();
+        pendingVerificationRows = 0;
+        draft?.Reset();
         gpu.Begin();
         for (int l = 0; l < 40; l++)
             if ((l + 1) % 4 != 0) { gpu.Clear(state[l]); gpu.Clear(convolution[l]); }
@@ -140,7 +142,9 @@ internal sealed partial class QwenEngine : IDisposable
             gpu.Dispatch("expert_gate_up", new() { N = 512, K = Hidden, M = 8 }, 8 * 512 * 32, 128, norm, weights.Shard("layers-" + layer + ".safetensors"), descriptors[layer], ids, expertActivation);
             gpu.Dispatch("expert_down", new() { N = Hidden, K = 512, M = 8 }, 8 * Hidden * 32, 128, expertActivation, weights.Shard("layers-" + layer + ".safetensors"), descriptors[layer], ids, expertOutput);
             gpu.Dispatch("mix", new() { N = Hidden, M = 8 }, Hidden, 128, x, expertOutput, rates, sharedOutput, sharedWeight, x);
+            ActiveDraft?.Capture(layer, x, 1);
         }
+        ActiveDraft?.CommitFeatures(1, position);
         if (output)
         {
             Normalize(x, "model.language_model.norm", norm); Project("lm_head", norm, logits);
@@ -180,15 +184,45 @@ internal sealed partial class QwenEngine : IDisposable
                 if (checkpoint) SavePrefix(position, boundaries);
             }
             var generated = new List<int>(); var text = new StringBuilder(); Decoder decoder = Encoding.UTF8.GetDecoder(); string finish = "length";
+            var verifiedTokens = new Queue<int>();
+            int cycles = 0, acceptedDraftTokens = 0;
+            double draftMs = 0, verifyMs = 0;
             for (int i = 0; i < maximum; i++)
             {
                 cancellation.ThrowIfCancellationRequested(); generated.Add(predicted);
                 if (!ignoreEos && (predicted == Tokenizer.End || predicted == Tokenizer.EndOfText)) { finish = "stop"; break; }
                 byte[] bytes = Tokenizer.TokenBytes(predicted); char[] chars = new char[bytes.Length + 4]; int count = decoder.GetChars(bytes, chars, flush: false);
                 string piece = new(chars, 0, count); text.Append(piece); if (piece.Length > 0 && onText is not null && !onText(piece)) { finish = "stop"; break; }
-                if (i + 1 < maximum) predicted = Forward(predicted, position++, true, ignoreEos);
+                if (i + 1 < maximum)
+                {
+                    if (verifiedTokens.TryDequeue(out int queued)) { predicted = queued; continue; }
+                    int width = Math.Min(VerificationCapacity, Math.Min(Context - position, maximum - i - 1));
+                    if (ActiveDraft is { } drafting && width > 1)
+                    {
+                        var watch = System.Diagnostics.Stopwatch.StartNew();
+                        int[] proposals = drafting.Propose(predicted, position, width);
+                        draftMs += watch.Elapsed.TotalMilliseconds;
+                        cancellation.ThrowIfCancellationRequested();
+                        int[] block = new int[width]; block[0] = predicted; proposals.CopyTo(block, 1);
+                        watch.Restart();
+                        int[] posterior = VerifyBlock(block, position, ignoreEos);
+                        int accepted = 0;
+                        while (accepted < proposals.Length && proposals[accepted] == posterior[accepted])
+                        {
+                            // Leave EOS as the unconsumed bonus, exactly as serial decode.
+                            if (!ignoreEos && (proposals[accepted] == Tokenizer.End || proposals[accepted] == Tokenizer.EndOfText)) break;
+                            accepted++;
+                        }
+                        predicted = CommitVerification(accepted + 1); position += accepted + 1;
+                        verifyMs += watch.Elapsed.TotalMilliseconds; cycles++; acceptedDraftTokens += accepted;
+                        foreach (int token in proposals.Take(accepted)) verifiedTokens.Enqueue(token);
+                        verifiedTokens.Enqueue(predicted); predicted = verifiedTokens.Dequeue();
+                    }
+                    else predicted = Forward(predicted, position++, true, ignoreEos);
+                }
             }
             cancellation.ThrowIfCancellationRequested();
+            LastSpeculationStats = new { cycles, accepted_draft_tokens = acceptedDraftTokens, draft_ms = draftMs, verification_ms = verifyMs };
             return new(text.ToString(), prompt.Length, generated.ToArray(), finish, cachedTokens);
         }
         catch
@@ -198,6 +232,6 @@ internal sealed partial class QwenEngine : IDisposable
             ClearPrefixCache(); throw;
         }
     }
-    public void Dispose() { foreach (var buffer in owned) buffer.Dispose(); weights.Dispose(); gpu.Dispose(); }
+    public void Dispose() { draft?.Dispose(); foreach (var buffer in owned) buffer.Dispose(); weights.Dispose(); gpu.Dispose(); }
 }
 internal sealed record Generation(string Text, int PromptTokens, int[] Tokens, string FinishReason, int CachedTokens = 0);

@@ -23,7 +23,7 @@ internal sealed class Checkpoint : IDisposable
         foreach (var entry in manifest.RootElement.GetProperty("files").EnumerateArray())
         {
             string name = entry.GetProperty("name").GetString()!;
-            if (name == "mtp.safetensors") continue; // Speculation and MTP are explicitly out of scope.
+            if (name == "mtp.safetensors") continue; // DFlash2 uses a separate pinned draft, not the target MTP head.
             string path = Path.Combine(directory, name);
             using (var stream = File.OpenRead(path))
             {

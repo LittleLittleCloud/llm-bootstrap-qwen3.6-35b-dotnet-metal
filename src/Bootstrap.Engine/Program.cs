@@ -12,16 +12,20 @@ string? Option(string name)
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
 if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
-if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "profile-decode" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test")
+    if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "profile-decode")
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
         using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow);
+        if (Option("--draft-dir") is { } draftDirectory) engine.LoadDraft(draftDirectory, Path.Combine(AppContext.BaseDirectory, "draft-manifest.json"));
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
         engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
+        if (command == "profile-decode") { engine.ProfileDecode(); return; }
+        if (command == "draft-self-test") { engine.DraftSelfTest(Option("--output-dir") ?? throw new ArgumentException("--output-dir is required")); return; }
+        if (command == "verification-self-test") { engine.VerificationSelfTest(); return; }
         if (command == "prefix-cache-self-test") { PrefixCacheSelfTest.Run(engine); return; }
         if (command == "context-self-test")
         {
@@ -52,7 +56,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "context-self-test"
         var inputTokens = engine.Tokenizer.SimpleChat(prompt);
         Console.Error.WriteLine($"Model ready; {engine.AllocatedBytes} Metal buffer bytes; {inputTokens.Length} prompt tokens");
         var result = engine.Generate(inputTokens, int.Parse(Option("--max-tokens") ?? int.MaxValue.ToString()), args.Contains("--ignore-eos"), piece => { Console.Error.Write(piece); return true; });
-        Console.Error.WriteLine(); Console.WriteLine(JsonSerializer.Serialize(result));
+        Console.Error.WriteLine(); Console.Error.WriteLine(JsonSerializer.Serialize(engine.LastSpeculationStats)); Console.WriteLine(JsonSerializer.Serialize(result));
     }
     else
     {
