@@ -167,7 +167,7 @@ internal sealed partial class QwenEngine : IDisposable
             {
                 cancellation.ThrowIfCancellationRequested();
                 int boundary = boundaries.First(p => p > position);
-                int count = ContextLimits.PrefillCount(position, boundary - position);
+                int count = WidePrefill ? Math.Min(BatchBuffers.Capacity, boundary - position) : ContextLimits.PrefillCount(position, boundary - position);
                 bool checkpoint = position + count == boundary;
                 if (BatchedPrefill && count >= 8)
                 {

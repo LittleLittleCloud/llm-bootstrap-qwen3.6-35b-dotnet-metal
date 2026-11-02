@@ -2,6 +2,36 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    string tensorOpsPrecision = "legacy";
+    public string TensorOpsPrecision
+    {
+        get => tensorOpsPrecision;
+        set
+        {
+            if (value is not ("legacy" or "fp32" or "fp16" or "bf16")) throw new ArgumentException("Precision must be legacy, fp32, fp16 or bf16");
+            if (tensorOpsPrecision != value) { ClearPrefixCache(); tensorOpsPrecision = value; }
+        }
+    }
+    public bool Fp32TensorOps { get => TensorOpsPrecision == "fp32"; set => TensorOpsPrecision = value ? "fp32" : "legacy"; }
+    string ProjectionKernel(string kernel) => TensorOpsPrecision == "legacy" ? kernel : kernel + (TensorOpsPrecision == "fp32" ? "_mpp" : "_" + TensorOpsPrecision);
+    string attentionMode = "legacy";
+    bool widePrefill;
+    public string AttentionMode
+    {
+        get => attentionMode;
+        set
+        {
+            if (value is not ("legacy" or "tiled" or "fp16" or "fused-fp16")) throw new ArgumentException("Invalid attention mode");
+            if (attentionMode != value) { ClearPrefixCache(); attentionMode = value; }
+        }
+    }
+    public bool TiledAttention { get => AttentionMode != "legacy"; set => AttentionMode = value ? "tiled" : "legacy"; }
+    public bool WidePrefill
+    {
+        get => widePrefill;
+        set { if (widePrefill != value) { ClearPrefixCache(); widePrefill = value; } }
+    }
+    string AttentionKernel(string kernel) => kernel + (AttentionMode == "fp16" ? "_fp16" : "");
     BatchBuffers? batch;
     sealed class BatchBuffers
     {
@@ -29,14 +59,13 @@ internal sealed partial class QwenEngine
             return;
         }
         bool small = tensor.Shape[0] <= 32;
-        gpu.Dispatch2D(small ? "matrix_product_small" : "matrix_product", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, checked((uint)((tensor.Shape[0] + (small ? 31 : 63)) / (small ? 32 : 64) * (small ? 128 : 256))), checked((uint)((count + (small ? 15 : 31)) / (small ? 16 : 32))), small ? 128u : 256u, input, tensor.Binding, scales, output);
+        gpu.Dispatch2D(ProjectionKernel(small ? "matrix_product_small" : "matrix_product"), new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, checked((uint)((tensor.Shape[0] + (small ? 31 : 63)) / (small ? 32 : 64) * (small ? 128 : 256))), checked((uint)((count + (small ? 15 : 31)) / (small ? 16 : 32))), small ? 128u : 256u, input, tensor.Binding, scales, output);
     }
     int PrefillBlock(ReadOnlySpan<int> tokens, int position, bool output, bool ignoreEos, bool verify = false)
     {
         if (batch is null) { batch = new BatchBuffers(this); Console.Error.WriteLine("Batched FP32 prefill workspace ready; Metal buffer bytes=" + gpu.AllocatedBytes); }
         var b = batch; int count = tokens.Length; tokens.CopyTo(b.Tokens.Values<int>(count));
         EnsureCacheCapacity(position + count);
-        if ((long)count * 16 * (position + count) > ContextLimits.AttentionWorkspaceFloats) throw new ArgumentException("Prefill tile exceeds attention workspace");
         gpu.Begin();
         gpu.Dispatch("batch_embedding", new() { M = (uint)count }, checked((uint)count * Hidden), 128, weights["model.language_model.embed_tokens.weight"].Binding, b.Tokens, b.Hidden);
         for (int layer = 0; layer < 40; layer++)
@@ -60,10 +89,28 @@ internal sealed partial class QwenEngine
                 Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
                 var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f };
                 gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
-                gpu.Dispatch2D("batch_attention_scores", p, checked((uint)(position + count) * 32), checked((uint)count * 16), 128, b.Rotated, keyCache[layer], b.Scores);
-                var normalization = p; normalization.Position = (uint)(position + count - 1);
-                gpu.Dispatch("attention_softmax", normalization, checked((uint)count * 16 * 256), 256, b.Scores);
-                gpu.Dispatch("batch_attention_values", p, checked((uint)count * 4096), 128, b.Scores, valueCache[layer], b.Qgate, b.Rotated);
+                if (AttentionMode == "fused-fp16")
+                    gpu.Dispatch2D("batch_attention_fused_fp16", p, (uint)((count + 15) / 16) * 128, 16, 128, b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Rotated);
+                else
+                {
+                    // Keep the model batch wide while reusing the bounded attention
+                    // score workspace across query slices. KV includes the entire
+                    // batch; each slice retains its absolute causal position.
+                    int capacity = ContextLimits.AttentionWorkspaceFloats / 16 / (position + count);
+                    for (int first = 0; first < count; first += capacity)
+                    {
+                        int rows = Math.Min(capacity, count - first);
+                        var attention = p; attention.M = (uint)rows; attention.Position = (uint)(position + first);
+                        var query = new Binding(b.Rotated, (ulong)first * 4096 * 4);
+                        var gate = new Binding(b.Qgate, (ulong)first * 4096 * 4);
+                        if (TiledAttention) gpu.Dispatch2D(AttentionKernel("batch_attention_scores_tiled"), attention, (uint)((position + count + 31) / 32) * 128, (uint)((rows + 15) / 16) * 16, 128, query, keyCache[layer], b.Scores);
+                        else gpu.Dispatch2D("batch_attention_scores", attention, (uint)(position + count) * 32, (uint)rows * 16, 128, query, keyCache[layer], b.Scores);
+                        var normalization = attention; normalization.Position = (uint)(position + count - 1);
+                        gpu.Dispatch("attention_softmax", normalization, (uint)rows * 16 * 256, 256, b.Scores);
+                        if (TiledAttention) gpu.Dispatch2D(AttentionKernel("batch_attention_values_tiled"), attention, 8 * 128, (uint)((rows + 15) / 16) * 16, 128, b.Scores, valueCache[layer], gate, query);
+                        else gpu.Dispatch("batch_attention_values", attention, (uint)rows * 4096, 128, b.Scores, valueCache[layer], gate, query);
+                    }
+                }
                 BatchProject(path + ".o_proj", b.Rotated, b.Projection, count);
             }
             gpu.Dispatch("add", new() { N = checked((uint)count * Hidden) }, checked((uint)count * Hidden), 128, b.Hidden, b.Projection, b.Hidden);
@@ -75,7 +122,7 @@ internal sealed partial class QwenEngine
             gpu.Dispatch("expert_group", new() { M = (uint)count }, 256, 128, b.Ids, b.Offsets, b.SortedTokens, b.Inverse);
             var raw = weights.Shard("layers-" + layer + ".safetensors");
             uint tileLimit = (uint)Math.Min(count * 8, (count * 8 + 15) / 16 + 256);
-            void ExpertProjection(uint choice, uint rows, uint columns, GpuBuffer input, GpuBuffer result) => gpu.Dispatch2D(count <= VerificationCapacity ? "expert_matrix_tiny" : "expert_matrix", new() { N = rows, K = columns, Kind = choice }, count <= VerificationCapacity ? rows * 32 : ((rows + 63) / 64) * 256, tileLimit, count <= VerificationCapacity ? 128u : 256u, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
+            void ExpertProjection(uint choice, uint rows, uint columns, GpuBuffer input, GpuBuffer result) => gpu.Dispatch2D(count <= VerificationCapacity ? "expert_matrix_tiny" : ProjectionKernel("expert_matrix"), new() { N = rows, K = columns, Kind = choice }, count <= VerificationCapacity ? rows * 32 : ((rows + 63) / 64) * 256, tileLimit, count <= VerificationCapacity ? 128u : 256u, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
             ExpertProjection(0, 512, Hidden, b.Norm, b.ExpertGate); ExpertProjection(1, 512, Hidden, b.Norm, b.ExpertUp);
             gpu.Dispatch("silu_product", new() { N = checked((uint)count * 8 * 512) }, checked((uint)count * 8 * 512), 128, b.ExpertGate, b.ExpertUp, b.ExpertActivation);
             ExpertProjection(2, Hidden, 512, b.ExpertActivation, b.ExpertOutput);

@@ -36,6 +36,9 @@ internal static unsafe class Native
     [DllImport("bootstrap_metal", EntryPoint = "boot_dispatch")] internal static extern int Dispatch(nint context, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, nint* buffers, ulong* offsets, int count, in KernelArgs parameters, int parameterBytes, uint x, uint y, uint z, uint tx, uint ty, uint tz);
     [DllImport("bootstrap_metal", EntryPoint = "boot_profile")] internal static extern void Profile(nint context, int enabled);
     [DllImport("bootstrap_metal", EntryPoint = "boot_end")] internal static extern int End(nint context);
+    [DllImport("bootstrap_metal", EntryPoint = "boot_wall_reset")] internal static extern int WallReset(nint context, int sampleAttention);
+    [DllImport("bootstrap_metal", EntryPoint = "boot_kernel_wall_json")] internal static extern nint KernelWallJson(nint context);
+    [DllImport("bootstrap_metal", EntryPoint = "boot_wall_read")] internal static extern void WallRead(nint context, [Out] double[] wall, [Out] double[] attention);
 }
 
 internal sealed unsafe class GpuBuffer : IDisposable
@@ -77,6 +80,16 @@ internal sealed unsafe class Metal : IDisposable
         return new(handle, (ulong)new FileInfo(path).Length);
     }
     public void SetProfiling(bool enabled) => Native.Profile(Handle, enabled ? 1 : 0);
+    public void ResetWallTiming(bool sampleAttention = false, bool allKernels = false) => Check(Native.WallReset(Handle, allKernels ? 2 : sampleAttention ? 1 : 0));
+    public object ReadWallTiming()
+    {
+        double[] w = new double[7], a = new double[6]; Native.WallRead(Handle, w, a);
+        using var kernels = System.Text.Json.JsonDocument.Parse(Marshal.PtrToStringUTF8(Native.KernelWallJson(Handle))!);
+        return new { kernels = kernels.RootElement.Clone(), gpu_ms = w[0] * 1000, host_encode_ms = w[1] * 1000, host_commit_ms = w[2] * 1000,
+            host_wait_ms = w[3] * 1000, command_buffers = w[4], dispatches = w[5], counter_resolve_ms = w[6] * 1000,
+            attention_qk_ms = a[0] * 1000, attention_softmax_ms = a[1] * 1000, attention_av_ms = a[2] * 1000,
+            attention_qk_count = a[3], attention_softmax_count = a[4], attention_av_count = a[5] };
+    }
     public void Begin() => Check(Native.Begin(Handle));
     public void Clear(GpuBuffer buffer) => Check(Native.Clear(Handle, buffer.Handle));
     public void End() => Check(Native.End(Handle));
