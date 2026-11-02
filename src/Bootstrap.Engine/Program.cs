@@ -11,20 +11,21 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
+if (command == "kv-storage-self-test") { KvStorageTests.Run(File.ReadAllText(kernelFile)); return; }
 if (command == "tensorops-self-test") { TensorOpsSelfTest.Run(File.ReadAllText(kernelFile), Option("--precision") ?? "fp32", args.Contains("--optimized-projections"), int.Parse(Option("--expert-tile-rows") ?? "16"), args.Contains("--predecoded-projections"), args.Contains("--predecoded-experts")); return; }
-if (command == "profile-fast-attention") { FastAttentionTests.Run(File.ReadAllText(Option("--kernel-file") ?? kernelFile), int.Parse(Option("--runs") ?? "3"), args.Contains("--attention-tiles")); return; }
+if (command == "profile-fast-attention") { FastAttentionTests.Run(File.ReadAllText(Option("--kernel-file") ?? kernelFile), int.Parse(Option("--runs") ?? "3"), args.Contains("--attention-tiles"), Option("--kv-cache-precision") == "fp16"); return; }
 if (command == "profile-attention") { AttentionWallProfile.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--tiled-attention")); return; }
 if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
-if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "profile-prefill" or "profile-decode" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "profile-prefill" or "profile-decode" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve" or "compare-prefill" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "profile-prefill" or "profile-decode" or "speculation-self-test")
+    if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "profile-prefill" or "profile-decode" or "speculation-self-test")
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
-        using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow);
-        if (Option("--draft-dir") is { } draftDirectory) engine.LoadDraft(draftDirectory, Path.Combine(AppContext.BaseDirectory, "draft-manifest.json"));
         bool tunedPrefill = args.Contains("--tuned-prefill");
+        using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow, Option("--kv-cache-precision") ?? (tunedPrefill ? "fp16" : "fp32"));
+        if (Option("--draft-dir") is { } draftDirectory) engine.LoadDraft(draftDirectory, Path.Combine(AppContext.BaseDirectory, "draft-manifest.json"));
         bool fastPrefill = tunedPrefill || args.Contains("--fast-prefill");
         engine.TensorOpsPrecision = Option("--tensorops-precision") ?? (args.Contains("--fp32-tensorops") ? "fp32" : fastPrefill ? "fp16" : "legacy");
         engine.AttentionMode = Option("--attention-mode") ?? (args.Contains("--tiled-attention") ? "tiled" : tunedPrefill ? "fp16-device" : fastPrefill ? "fp16" : "legacy");
@@ -36,6 +37,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "context-self-test"
         engine.ExpertTileRows = int.Parse(Option("--expert-tile-rows") ?? (tunedPrefill ? "64" : "16"));
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
         engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
+        if (command == "kv-cache-self-test") { engine.KvCacheSelfTest(); return; }
         if (command == "speculation-self-test") { engine.SpeculationSelfTest(); return; }
         if (command == "compare-decode-variants") { engine.CompareDecodeVariants(int.Parse(Option("--runs") ?? "3")); return; }
         if (command == "compare-prefill-variants") { engine.ComparePrefillVariants(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required"), args.Contains("--fast-variants"), args.Contains("--projection-variants"), args.Contains("--batch-variants"), args.Contains("--tuned-variants"), args.Contains("--expert-variants"), args.Contains("--final-variants")); return; }

@@ -56,7 +56,7 @@ internal sealed partial class QwenEngine
             ClearPrefixCache();
         }
         var tokens = Tokenizer.SimpleChat(prompt);
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", prompt_tokens = tokens.Length,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", kv_cache_precision = KvCachePrecision, prompt_tokens = tokens.Length,
             context_window = ContextWindow, prefix_caching = PrefixCachingEnabled, draft_enabled = draft is not null,
             sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))),
             expected_answer = expectedAnswer, variants = variants.Select(Name), runs,

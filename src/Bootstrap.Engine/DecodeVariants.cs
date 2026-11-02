@@ -18,7 +18,7 @@ internal sealed partial class QwenEngine
             var result=Generate(tokens,1000,true,piece => { lastMs=watch.Elapsed.TotalMilliseconds; if(firstMs<0)firstMs=lastMs;return true; });
             double elapsed=watch.Elapsed.TotalMilliseconds;
             if(result.Tokens.Length!=1000)throw new Exception("Fixed-length decode ended early");
-            Console.WriteLine(JsonSerializer.Serialize(new {type="decode_variant",run,variant=optimized?"optimized_attention_small_verifier":"previous_fast_prefill",warm=run>0,prompt_tokens=tokens.Length,output_tokens=result.Tokens.Length,wall_ms=elapsed,first_delta_ms=firstMs,last_delta_ms=lastMs,decode_tokens_per_second=(result.Tokens.Length-1)*1000/(lastMs-firstMs),speculation=LastSpeculationStats}));
+            Console.WriteLine(JsonSerializer.Serialize(new {type="decode_variant",kv_cache_precision=KvCachePrecision,run,variant=optimized?"optimized_attention_small_verifier":"previous_fast_prefill",warm=run>0,prompt_tokens=tokens.Length,output_tokens=result.Tokens.Length,wall_ms=elapsed,first_delta_ms=firstMs,last_delta_ms=lastMs,decode_tokens_per_second=(result.Tokens.Length-1)*1000/(lastMs-firstMs),speculation=LastSpeculationStats}));
         }
     }
 }

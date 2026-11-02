@@ -11,6 +11,13 @@ inline float f8(uchar x) {
     if(e==15&&m==7)return NAN;
     return as_type<float>((uint(x&128)<<24)|((e+120)<<23)|(m<<20));
 }
+// Bit 8 selects FP16 cache storage; compute and softmax remain FP32.
+inline float kv_load(device const float*cache,uint index,uint flags) {
+    return flags&256 ? float(((device const half*)cache)[index]) : cache[index];
+}
+inline void kv_store(device float*cache,uint index,float value,uint flags) {
+    if(flags&256)((device half*)cache)[index]=half(value);else cache[index]=value;
+}
 inline float sigmoid(float x) {return 1.0f/(1.0f+exp(-x));}
 inline float silu(float x) {return x*sigmoid(x);}
 inline float softplus(float x) {return max(x,0.0f)+log(1.0f+exp(-abs(x)));}
@@ -94,10 +101,10 @@ inline float rotated(device const float*x,uint head,uint d,uint position,float t
     if(d>=64)return x[head*256+d];uint j=d%32;float angle=float(position)*pow(theta,-float(2*j)/64.0f),a=x[head*256+j],b=x[head*256+32+j];return d<32?a*cos(angle)-b*sin(angle):b*cos(angle)+a*sin(angle);
 }
 kernel void rope_cache(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*v [[buffer(2)]],device float*qr [[buffer(3)]],device float*kc [[buffer(4)]],device float*vc [[buffer(5)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
-    if(i<4096)qr[i]=rotated(q,i/256,i%256,p.pos,p.theta);if(i<512){kc[p.pos*512+i]=rotated(k,i/256,i%256,p.pos,p.theta);vc[p.pos*512+i]=v[i];}
+    if(i<4096)qr[i]=rotated(q,i/256,i%256,p.pos,p.theta);if(i<512){kv_store(kc,p.pos*512+i,rotated(k,i/256,i%256,p.pos,p.theta),p.flags);kv_store(vc,p.pos*512+i,v[i],p.flags);}
 }
 kernel void attention_scores(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device float*scores [[buffer(2)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
-    uint row=g/32,h=row/(p.pos+1),t=row%(p.pos+1);if(h>=16)return;float sum=0;for(uint d=lane;d<256;d+=32)sum+=q[h*256+d]*k[(t*2+h/8)*256+d];sum=simd_sum(sum);if(lane==0)scores[h*p.k+t]=sum*(1.0f/16.0f);
+    uint row=g/32,h=row/(p.pos+1),t=row%(p.pos+1);if(h>=16)return;float sum=0;for(uint d=lane;d<256;d+=32)sum+=q[h*256+d]*kv_load(k,(t*2+h/8)*256+d,p.flags);sum=simd_sum(sum);if(lane==0)scores[h*p.k+t]=sum*(1.0f/16.0f);
 }
 kernel void attention_softmax(device float*x [[buffer(0)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint head [[threadgroup_position_in_grid]]) {
     threadgroup float partial[8];threadgroup float maximum,denominator;float top=-INFINITY;
@@ -105,7 +112,7 @@ kernel void attention_softmax(device float*x [[buffer(0)]],constant P&p [[buffer
     float sum=0;for(uint i=tid;i<=p.pos;i+=256){float value=exp(x[head*p.k+i]-maximum);x[head*p.k+i]=value;sum+=value;}sum=simd_sum(sum);if((tid&31)==0)partial[tid/32]=sum;threadgroup_barrier(mem_flags::mem_threadgroup);sum=simd_sum(tid<8?partial[tid]:0);if(tid==0)denominator=sum;threadgroup_barrier(mem_flags::mem_threadgroup);for(uint i=tid;i<=p.pos;i+=256)x[head*p.k+i]/=denominator;
 }
 kernel void attention_values(device const float*scores [[buffer(0)]],device const float*v [[buffer(1)]],device const float*gate [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
-    if(i>=4096)return;uint h=i/256,d=i%256;float sum=0;for(uint t=0;t<=p.pos;++t)sum+=scores[h*p.k+t]*v[(t*2+h/8)*256+d];y[i]=sum*sigmoid(gate[i]);
+    if(i>=4096)return;uint h=i/256,d=i%256;float sum=0;for(uint t=0;t<=p.pos;++t)sum+=scores[h*p.k+t]*kv_load(v,(t*2+h/8)*256+d,p.flags);y[i]=sum*sigmoid(gate[i]);
 }
 kernel void argmax(device const float*x [[buffer(0)]],device int*out [[buffer(1)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]]) {
     threadgroup float values[8];threadgroup uint indices[8];float best=-INFINITY;uint index=0xffffffff;
@@ -203,13 +210,13 @@ kernel void batch_delta(device const float*q [[buffer(0)]],device const float*k 
 }
 kernel void batch_split_q(device const float*x [[buffer(0)]],device float*q [[buffer(1)]],device float*gate [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.m*4096){uint token=i/4096,h=(i%4096)/256,d=i%256;q[i]=x[token*8192+h*512+d];gate[i]=x[token*8192+h*512+256+d];}}
 kernel void batch_rope(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*v [[buffer(2)]],device float*qr [[buffer(3)]],device float*kc [[buffer(4)]],device float*vc [[buffer(5)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
-    if(i>=p.m*4096)return;uint token=i/4096,j=i%4096;qr[i]=rotated(q+token*4096,j/256,j%256,p.pos+token,p.theta);if(j<512){kc[(p.pos+token)*512+j]=rotated(k+token*512,j/256,j%256,p.pos+token,p.theta);vc[(p.pos+token)*512+j]=v[token*512+j];}
+    if(i>=p.m*4096)return;uint token=i/4096,j=i%4096;qr[i]=rotated(q+token*4096,j/256,j%256,p.pos+token,p.theta);if(j<512){kv_store(kc,(p.pos+token)*512+j,rotated(k+token*512,j/256,j%256,p.pos+token,p.theta),p.flags);kv_store(vc,(p.pos+token)*512+j,v[token*512+j],p.flags);}
 }
 kernel void batch_attention_scores(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device float*scores [[buffer(2)]],constant P&p [[buffer(15)]],uint3 g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
-    uint token=g.y/16,h=g.y%16,t=g.x/32;if(token>=p.m)return;float sum=0;if(t<=p.pos+token)for(uint d=lane;d<256;d+=32)sum+=q[token*4096+h*256+d]*k[(t*2+h/8)*256+d];sum=simd_sum(sum);if(lane==0)scores[(token*16+h)*p.k+t]=t<=p.pos+token?sum*(1.0f/16.0f):-INFINITY;
+    uint token=g.y/16,h=g.y%16,t=g.x/32;if(token>=p.m)return;float sum=0;if(t<=p.pos+token)for(uint d=lane;d<256;d+=32)sum+=q[token*4096+h*256+d]*kv_load(k,(t*2+h/8)*256+d,p.flags);sum=simd_sum(sum);if(lane==0)scores[(token*16+h)*p.k+t]=t<=p.pos+token?sum*(1.0f/16.0f):-INFINITY;
 }
 kernel void batch_attention_values(device const float*scores [[buffer(0)]],device const float*v [[buffer(1)]],device const float*gate [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
-    if(i>=p.m*4096)return;uint token=i/4096,h=(i%4096)/256,d=i%256;float sum=0;for(uint t=0;t<=p.pos+token;++t)sum+=scores[(token*16+h)*p.k+t]*v[(t*2+h/8)*256+d];y[i]=sum*sigmoid(gate[i]);
+    if(i>=p.m*4096)return;uint token=i/4096,h=(i%4096)/256,d=i%256;float sum=0;for(uint t=0;t<=p.pos+token;++t)sum+=scores[(token*16+h)*p.k+t]*kv_load(v,(t*2+h/8)*256+d,p.flags);y[i]=sum*sigmoid(gate[i]);
 }
 
 // Copies also support Binding byte offsets for accepted-row state commits.
@@ -236,7 +243,7 @@ inline float draft_rotated(device const float*x,uint d,uint pos,float theta) {
 }
 kernel void draft_context_kv(device const float*k [[buffer(0)]],device const float*v [[buffer(1)]],device float*kc [[buffer(2)]],device float*vc [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*1024)return;uint row=i/1024,d=i%1024,at=((p.pos+row)%2048)*1024+d;
-    kc[at]=draft_rotated(k+row*1024,d,p.pos+row,p.theta);vc[at]=v[i];
+    kv_store(kc,at,draft_rotated(k+row*1024,d,p.pos+row,p.theta),p.flags);kv_store(vc,at,v[i],p.flags);
 }
 // Each thread owns a complete rotary pair, making this in-place update race-free.
 kernel void draft_rotate(device float*q [[buffer(0)]],device float*k [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
@@ -247,12 +254,12 @@ kernel void draft_rotate(device float*q [[buffer(0)]],device float*k [[buffer(1)
 kernel void draft_attention_scores(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*kc [[buffer(2)]],device float*scores [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
     uint index=i/32,slot=index%p.k,h=(index/p.k)%32,row=index/(p.k*32);if(row>=p.m)return;
     uint start=p.pos>2048?p.pos-2048:0,t=start+slot;bool context=slot<p.a,valid=context?(t<p.pos && p.pos+row-t<2048):(slot-p.a<p.m);
-    float sum=0;if(valid){uint at=context?((t%2048)*8+h/4)*128:((slot-p.a)*8+h/4)*128;device const float*key=context?kc:k;for(uint d=lane;d<128;d+=32)sum+=q[(row*32+h)*128+d]*key[at+d];}
+    float sum=0;if(valid){uint at=context?((t%2048)*8+h/4)*128:((slot-p.a)*8+h/4)*128;for(uint d=lane;d<128;d+=32)sum+=q[(row*32+h)*128+d]*(context?kv_load(kc,at+d,p.flags):k[at+d]);}
     sum=simd_sum(sum);if(lane==0)scores[index]=valid?sum*rsqrt(128.0f):-INFINITY;
 }
 kernel void draft_attention_values(device const float*scores [[buffer(0)]],device const float*v [[buffer(1)]],device const float*vc [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*4096)return;uint row=i/4096,h=(i%4096)/128,d=i%128,start=p.pos>2048?p.pos-2048:0;float sum=0;
-    for(uint t=start;t<p.pos;++t)sum+=scores[(row*32+h)*p.k+t-start]*vc[((t%2048)*8+h/4)*128+d];
+    for(uint t=start;t<p.pos;++t)sum+=scores[(row*32+h)*p.k+t-start]*kv_load(vc,((t%2048)*8+h/4)*128+d,p.flags);
     for(uint t=0;t<p.m;++t)sum+=scores[(row*32+h)*p.k+p.a+t]*v[(t*8+h/4)*128+d];y[i]=sum;
 }
 // Greedy top-16 unary shortlist followed by the learned predecessor/successor
@@ -546,7 +553,7 @@ kernel void batch_attention_scores_tiled(device const float*q [[buffer(0)]],devi
     for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
     for(uint block=0;block<256;block+=32){
         for(uint i=tid;i<16*32;i+=128){uint r=i/32,d=i%32;qt[r*33+d]=firstRow+r<p.m?q[((firstRow+r)*16+head)*256+block+d]:0;}
-        for(uint i=tid;i<32*32;i+=128){uint t=i/32,d=i%32;kt[d*33+t]=firstKey+t<p.k?k[((firstKey+t)*2+head/8)*256+block+d]:0;}
+        for(uint i=tid;i<32*32;i+=128){uint t=i/32,d=i%32;kt[d*33+t]=firstKey+t<p.k?kv_load(k,((firstKey+t)*2+head/8)*256+block+d,p.flags):0;}
         threadgroup_barrier(mem_flags::mem_threadgroup);op.run(left,right,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     auto destination=tensor(result,dextents<int,2>{32,16},array<int,2>{1,33});acc.store(destination);threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -566,7 +573,7 @@ kernel void batch_attention_values_tiled(device const float*scores [[buffer(0)]]
     uint end=min(p.k,p.pos+firstRow+16);
     for(uint block=0;block<end;block+=64){
         for(uint i=tid;i<16*64;i+=128){uint r=firstRow+i/64,t=block+i%64;pt[(i/64)*65+i%64]=r<p.m&&t<p.k&&t<=p.pos+r?scores[(r*16+head)*p.k+t]:0;}
-        for(uint i=tid;i<64*32;i+=128){uint t=block+i/32,d=firstDim+i%32;vt[(i/32)*33+i%32]=t<p.k?v[(t*2+head/8)*256+d]:0;}
+        for(uint i=tid;i<64*32;i+=128){uint t=block+i/32,d=firstDim+i%32;vt[(i/32)*33+i%32]=t<p.k?kv_load(v,(t*2+head/8)*256+d,p.flags):0;}
         threadgroup_barrier(mem_flags::mem_threadgroup);op.run(left,right,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     auto destination=tensor(result,dextents<int,2>{32,16},array<int,2>{1,33});acc.store(destination);threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -586,7 +593,7 @@ kernel void batch_attention_scores_tiled_fp16(device const float*q [[buffer(0)]]
     for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
     for(uint block=0;block<256;block+=32){
         for(uint i=tid;i<16*32;i+=128){uint r=i/32,d=i%32;qt[r*33+d]=firstRow+r<p.m?q[((firstRow+r)*16+head)*256+block+d]:0;}
-        for(uint i=tid;i<32*32;i+=128){uint t=i/32,d=i%32;kt[d*33+t]=firstKey+t<p.k?k[((firstKey+t)*2+head/8)*256+block+d]:0;}
+        for(uint i=tid;i<32*32;i+=128){uint t=i/32,d=i%32;kt[d*33+t]=firstKey+t<p.k?kv_load(k,((firstKey+t)*2+head/8)*256+block+d,p.flags):0;}
         threadgroup_barrier(mem_flags::mem_threadgroup);op.run(left,right,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     auto destination=tensor(result,dextents<int,2>{32,16},array<int,2>{1,33});acc.store(destination);threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -607,7 +614,7 @@ kernel void batch_attention_values_tiled_fp16(device const float*scores [[buffer
     uint end=min(p.k,p.pos+firstRow+16);
     for(uint block=0;block<end;block+=64){
         for(uint i=tid;i<16*64;i+=128){uint r=firstRow+i/64,t=block+i%64;pt[(i/64)*65+i%64]=r<p.m&&t<p.k&&t<=p.pos+r?scores[(r*16+head)*p.k+t]:0;}
-        for(uint i=tid;i<64*32;i+=128){uint t=block+i/32,d=firstDim+i%32;vt[(i/32)*33+i%32]=t<p.k?v[(t*2+head/8)*256+d]:0;}
+        for(uint i=tid;i<64*32;i+=128){uint t=block+i/32,d=firstDim+i%32;vt[(i/32)*33+i%32]=t<p.k?kv_load(v,(t*2+head/8)*256+d,p.flags):0;}
         threadgroup_barrier(mem_flags::mem_threadgroup);op.run(left,right,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     auto destination=tensor(result,dextents<int,2>{32,16},array<int,2>{1,33});acc.store(destination);threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -640,7 +647,7 @@ kernel void batch_attention_fused_fp16(device const float*q [[buffer(0)]],device
         for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
         for(uint block=0;block<256;block+=64){
             for(uint i=tid;i<16*64;i+=128){uint r=firstRow+i/64,d=block+i%64;leftData[i]=r<p.m?half(q[(r*16+head)*256+d]):half(0);}
-            for(uint i=tid;i<64*64;i+=128){uint t=firstKey+i/64,d=block+i%64;rightData[(i%64)*64+i/64]=t<p.k?half(k[(t*2+head/8)*256+d]):half(0);}
+            for(uint i=tid;i<64*64;i+=128){uint t=firstKey+i/64,d=block+i%64;rightData[(i%64)*64+i/64]=t<p.k?half(kv_load(k,(t*2+head/8)*256+d,p.flags)):half(0);}
             threadgroup_barrier(mem_flags::mem_threadgroup);op.run(left,right,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         auto scores=tensor(score,dextents<int,2>{64,16},array<int,2>{1,64});acc.store(scores);threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -661,7 +668,7 @@ kernel void batch_attention_fused_fp16(device const float*q [[buffer(0)]],device
         for(uint i=0;i<out0.get_capacity();++i){auto ij=out0.get_multidimensional_index(i);if(ij[0]<64&&ij[1]<16){float scale=alpha[ij[1]];out0[i]*=scale;out1[i]*=scale;out2[i]*=scale;out3[i]*=scale;}}
         #pragma unroll
         for(uint firstDim=0;firstDim<256;firstDim+=64){
-            for(uint i=tid;i<64*64;i+=128){uint t=firstKey+i/64,d=firstDim+i%64;rightData[i]=t<p.k?half(v[(t*2+head/8)*256+d]):half(0);}
+            for(uint i=tid;i<64*64;i+=128){uint t=firstKey+i/64,d=firstDim+i%64;rightData[i]=t<p.k?half(kv_load(v,(t*2+head/8)*256+d,p.flags)):half(0);}
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if(firstDim==0)op.run(left,right,out0);
             else if(firstDim==64)op.run(left,right,out1);
@@ -702,7 +709,7 @@ kernel void batch_attention_fused_fp16_bk128(device const float*q [[buffer(0)]],
         for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
         for(uint block=0;block<256;block+=64){
             for(uint i=tid;i<16*64;i+=128){uint r=firstRow+i/64,d=block+i%64;leftData[i]=r<p.m?half(q[(r*16+head)*256+d]):half(0);}
-            for(uint i=tid;i<128*64;i+=128){uint t=firstKey+i/64,d=block+i%64;rightData[(i%64)*128+i/64]=t<p.k?half(k[(t*2+head/8)*256+d]):half(0);}
+            for(uint i=tid;i<128*64;i+=128){uint t=firstKey+i/64,d=block+i%64;rightData[(i%64)*128+i/64]=t<p.k?half(kv_load(k,(t*2+head/8)*256+d,p.flags)):half(0);}
             threadgroup_barrier(mem_flags::mem_threadgroup);qop.run(qleft,qright,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         auto scores=tensor(score,dextents<int,2>{128,16},array<int,2>{1,128});acc.store(scores);threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -727,7 +734,7 @@ kernel void batch_attention_fused_fp16_bk128(device const float*q [[buffer(0)]],
         for(uint i=0;i<out0.get_capacity();++i){auto ij=out0.get_multidimensional_index(i);if(ij[0]<64&&ij[1]<16){float scale=alpha[ij[1]];out0[i]*=scale;out1[i]*=scale;out2[i]*=scale;out3[i]*=scale;}}
         #pragma unroll
         for(uint firstDim=0;firstDim<256;firstDim+=64){
-            for(uint i=tid;i<128*64;i+=128){uint t=firstKey+i/64,d=firstDim+i%64;rightData[i]=t<p.k?half(v[(t*2+head/8)*256+d]):half(0);}
+            for(uint i=tid;i<128*64;i+=128){uint t=firstKey+i/64,d=firstDim+i%64;rightData[i]=t<p.k?half(kv_load(v,(t*2+head/8)*256+d,p.flags)):half(0);}
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if(firstDim==0)vop.run(pleft,vright,out0);
             else if(firstDim==64)vop.run(pleft,vright,out1);
@@ -940,7 +947,7 @@ kernel void batch_attention_scores_tiled_fp16_opt64(device const float*q [[buffe
     for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
     for(uint block=0;block<256;block+=64){
         for(uint i=tid;i<16*64;i+=128){uint r=i/64,d=i%64;qt[r*65+d]=firstRow+r<p.m?q[((firstRow+r)*16+head)*256+block+d]:0;}
-        for(uint i=tid;i<32*64;i+=128){uint t=i/64,d=i%64;kt[t*65+d]=firstKey+t<p.k?k[((firstKey+t)*2+head/8)*256+block+d]:0;}
+        for(uint i=tid;i<32*64;i+=128){uint t=i/64,d=i%64;kt[t*65+d]=firstKey+t<p.k?kv_load(k,((firstKey+t)*2+head/8)*256+block+d,p.flags):0;}
         threadgroup_barrier(mem_flags::mem_threadgroup);op.run(left,right,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     #pragma unroll
@@ -961,7 +968,7 @@ kernel void batch_attention_values_tiled_fp16_opt64(device const float*scores [[
     uint end=min(p.k,p.pos+firstRow+16);
     for(uint block=0;block<end;block+=64){
         for(uint i=tid;i<16*64;i+=128){uint r=firstRow+i/64,t=block+i%64;pt[(i/64)*65+i%64]=r<p.m&&t<p.k&&t<=p.pos+r?scores[(r*16+head)*p.k+t]:0;}
-        for(uint i=tid;i<64*32;i+=128){uint t=block+i/32,d=firstDim+i%32;vt[(i/32)*33+i%32]=t<p.k?v[(t*2+head/8)*256+d]:0;}
+        for(uint i=tid;i<64*32;i+=128){uint t=block+i/32,d=firstDim+i%32;vt[(i/32)*33+i%32]=t<p.k?kv_load(v,(t*2+head/8)*256+d,p.flags):0;}
         threadgroup_barrier(mem_flags::mem_threadgroup);op.run(left,right,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     #pragma unroll

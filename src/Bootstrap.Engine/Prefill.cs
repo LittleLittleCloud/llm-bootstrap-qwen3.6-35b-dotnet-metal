@@ -106,7 +106,7 @@ internal sealed partial class QwenEngine
         if (count > b.Capacity) throw new ArgumentException("Batch exceeds allocated workspace");
         EnsureCacheCapacity(position + count);
         ActiveDraft?.EnsureFeatureCapacity(count);
-        if (!verify && AttentionMode == "fp16-device") { deviceAttention ??= new(gpu); deviceAttention.Prepare(count, position + count); }
+        if (!verify && AttentionMode == "fp16-device") { deviceAttention ??= new(gpu); deviceAttention.Prepare(count, position + count, HalfKv); }
         gpu.Begin();
         gpu.Dispatch("batch_embedding", new() { M = (uint)count }, checked((uint)count * Hidden), 128, weights["model.language_model.embed_tokens.weight"].Binding, b.Tokens, b.Hidden);
         for (int layer = 0; layer < 40; layer++)
@@ -128,10 +128,10 @@ internal sealed partial class QwenEngine
                 BatchProject(path + ".q_proj", b.Norm, b.Qkv, count); BatchProject(path + ".k_proj", b.Norm, b.K, count); BatchProject(path + ".v_proj", b.Norm, b.V, count);
                 gpu.Dispatch("batch_split_q", new() { M = (uint)count }, checked((uint)count * 4096), 128, b.Qkv, b.Q, b.Qgate);
                 Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
-                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f };
+                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f, Flags = KvFlags };
                 gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
                 if (!verify && AttentionMode == "fp16-device")
-                    deviceAttention!.Encode(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position);
+                    deviceAttention!.Encode(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position, HalfKv);
                 else if (AttentionMode == "fused-fp16")
                     gpu.Dispatch2D("batch_attention_fused_fp16", p, (uint)((count + 15) / 16) * 128, 16, 128, b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Rotated);
                 else

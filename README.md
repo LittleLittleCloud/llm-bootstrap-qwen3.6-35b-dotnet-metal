@@ -17,7 +17,9 @@ The model is official `Qwen/Qwen3.6-35B-A3B-FP8`, pinned at
 scales are read directly; source BF16 tensors retain their values. Default computation,
 KV and recurrent state are FP32. The opt-in `--fast-prefill` preset uses FP16
 projection and attention operands with FP32 accumulation, softmax, KV and recurrent
-state; see the fast-prefill measurements below. The default served window is the checkpoint's
+state; see the fast-prefill measurements below. `--tuned-prefill` now selects FP16
+KV storage for both target and draft; `--kv-cache-precision fp32` retains the
+previous storage for comparison. The default served window is the checkpoint's
 native 262144 tokens. `--context-window` can select a smaller window (1–262144).
 KV storage starts at at most 4096 tokens and grows as positions are consumed;
 requesting a large output allowance does not reserve that whole allowance in memory.
@@ -430,12 +432,13 @@ expert tiles, and FP16 device-tensor attention. Dense projection weights are
 unpacked into reusable FP16 scratch once per projection, so each output tile
 does not repeat FP8 conversion. Expert projections retain inline conversion,
 with row-major staging and direct accumulator writes. FP32 accumulation,
-softmax, KV storage, and the original checkpoint files are retained. Small
-speculative verification uses the existing FP32 attention kernels. The previous
+softmax, recurrent state, and the original checkpoint files are retained. KV
+storage now defaults to FP16 in this preset (see below); small speculative
+verification uses FP32 attention arithmetic while reading the selected KV type. The previous
 `--fast-prefill` preset and the default engine configuration remain available.
 
-On the M5 Pro, alternating three warm uncached runs of the same 10,520-token
-public prompt produced the following medians. Model loading and tokenization
+At commit `a64c09a` with FP32 KV, alternating three warm uncached runs on the
+M5 Pro of the same 10,520-token public prompt produced the following medians. Model loading and tokenization
 are excluded, and both variants reserve the largest comparison workspace.
 
 | Configuration | Prefill wall time | Prefill tok/s | 1K decode tok/s |
@@ -496,3 +499,52 @@ Large commands require multiple timestamp buffers: the profiler now uses eight
 The completed run is `profile-after-multi-buffer.jsonl`; earlier capacity-error
 attempts are retained separately with stderr. The profiling change leaves the
 shader and model arithmetic used by the completed validation unchanged.
+
+## FP16 KV storage
+
+`--tuned-prefill` now defaults to `--kv-cache-precision fp16` for both the target
+and DFlash draft. Other presets retain FP32 KV by default. Either precision can
+be selected explicitly before engine construction; storage cannot change during
+a session. FP8 KV is not implemented. All attention modes, single-token decode,
+batched prefill and speculative verification read the selected cache type.
+RoPE computes in FP32 and rounds on cache write. Attention accumulation, softmax,
+recurrent/conv state and prefix snapshots remain FP32.
+
+At 32,768-token capacity, target KV occupies **640 MiB instead of 1280 MiB**.
+The draft's 2048-token ring occupies 48 MiB instead of 96 MiB. Device-tensor
+attention consumes these half buffers directly instead of retaining another
+FP16 K/V copy (up to 64 MiB at 32K). KV growth copies raw bytes and frees the old
+buffer; prefix-state hashes use the actual cache element size.
+
+The preceding FP32-KV formal run in LLM Bootstrap PR #36 remains an unchanged
+partial report: Metal ran out of memory after growth to 32K, followed by failed
+needle/cache requests. A local regression with FP16 KV now passes with verifier
+tapes, four prefix snapshots and the 2048-token batch workspace allocated in the
+same process. Two 30,044-token public access-code prompts at depths 5% and 90%
+return the expected answer; each passes two exact cached repeats, and a short
+cached request after 32K growth also succeeds. Metal allocation is
+40,069,070,848 bytes, versus the earlier failure's last logged 40,824,045,568
+bytes. These are allocations, not a measured system-wide residency limit.
+The long prompts took 30.39 and 29.99 s to first token (989 and 1002 effective
+input tok/s); they are different workloads from the historical 10K table above.
+
+Validation also passes 45,160 storage/CPU-reference checks across FP32/FP16,
+including target RoPE writes, prefix/tail guards, single-token decode, draft ring
+wrap and mixed cached/local draft attention. All seven attention paths pass nine
+shapes with output-alias checks (maximum absolute CPU-reference error 7.68e-7).
+The existing 1,659 kernel checks, 45 verifier checks and 48 prefix-cache checks
+pass. This is development regression coverage, not a new full evaluation or a
+general quality guarantee for FP16 cache rounding.
+
+```sh
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll kv-storage-self-test
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll \
+  profile-fast-attention --kv-cache-precision fp16 --runs 1
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll \
+  kv-cache-self-test --model-dir "$TARGET" --draft-dir "$DRAFT" --tuned-prefill
+```
+
+Local raw results, resource samples and source hashes are in `artifacts/fp16-kv/`.
+Comparison commands report the selected KV precision and use it for all their
+candidates; they do not switch cache storage between variants. Use an explicit
+`--kv-cache-precision fp32` when reproducing historical FP32-KV measurements.

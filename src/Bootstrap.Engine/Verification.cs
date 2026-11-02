@@ -135,6 +135,6 @@ internal sealed partial class QwenEngine
             }
         }
         Reset();
-        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { verifier_checks_passed = checks, projection_precision = TensorOpsPrecision, attention_mode = AttentionMode, wide_prefill = WidePrefill, metal_buffer_bytes = AllocatedBytes, timings }));
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { verifier_checks_passed = checks, kv_cache_precision = KvCachePrecision, projection_precision = TensorOpsPrecision, attention_mode = AttentionMode, wide_prefill = WidePrefill, metal_buffer_bytes = AllocatedBytes, timings }));
     }
 }
