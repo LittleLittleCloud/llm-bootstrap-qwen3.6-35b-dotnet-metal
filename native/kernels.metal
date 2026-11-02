@@ -1205,7 +1205,22 @@ ONLINE_REUSE(32,256,8,8)
 
 // One SIMD group owns 32 output columns. Prefetch packed FP8 bytes into
 // registers while alternating two FP16 weight stages; accumulate in FP32.
-template<int Rows, int KS, bool Prefetch, class Acc>
+// Layout 1: [N/32, K/32, lane, byte]. Layout 2 interleaves
+// four-byte loads across lanes: [N/32, K/32, byte/4, lane, byte%4].
+// Both layouts preserve every FP8 byte and use the original BF16 scales.
+template<int Layout>
+inline uint expert_byte_offset(uint row,uint col,uint k) {
+    if constexpr(Layout==1)return (row/32)*k*32+(col/32)*1024+(row%32)*32+col%32;
+    if constexpr(Layout==2)return (row/32)*k*32+(col/32)*1024+((col%32)/4)*128+(row%32)*4+col%4;
+    return row*k+col;
+}
+kernel void expert_repack_bytes(device const uchar*raw [[buffer(0)]],device const Expert*experts [[buffer(1)]],device uchar*packed [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    uint size=p.n*p.k,e=i/size;if(e>=p.a)return;
+    uint row=(i%size)/p.k,col=i%p.k;Expert d=experts[e];ulong off=p.kind==0?d.gate:p.kind==1?d.up:d.down;
+    uint dest=p.flags==1?expert_byte_offset<1>(row,col,p.k):expert_byte_offset<2>(row,col,p.k);
+    packed[off+dest]=raw[off+row*p.k+col];
+}
+template<int Rows, int KS, bool Prefetch, int Layout, class Acc>
 inline void expert_staged_accumulate(device half*x,device const uchar*w,device const ushort*s,
     uint k,uint n,uint firstColumn,uint live,uint lane,threadgroup half*stage,thread Acc &acc) {
     constexpr auto desc=matmul2d_descriptor(Rows,32,KS,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
@@ -1217,14 +1232,14 @@ inline void expert_staged_accumulate(device half*x,device const uchar*w,device c
 
     const uint row=firstColumn+lane;
     uchar4 bytes[KS/4];float scale=0;
-    if(Prefetch&&row<n){for(uint j=0;j<KS/4;j++)bytes[j]=*((device const uchar4*)(w+row*k+j*4));scale=bf(s[(row/128)*(k/128)]);}
+    if(Prefetch&&row<n){for(uint j=0;j<KS/4;j++)bytes[j]=*((device const uchar4*)(w+expert_byte_offset<Layout>(row,j*4,k)));scale=bf(s[(row/128)*(k/128)]);}
     for(uint block=0;block<k;block+=KS){
         uint buffer=Prefetch?((block/KS)&1):0;
-        if(!Prefetch&&row<n){for(uint j=0;j<KS/4;j++)bytes[j]=*((device const uchar4*)(w+row*k+block+j*4));scale=bf(s[(row/128)*(k/128)+block/128]);}
+        if(!Prefetch&&row<n){for(uint j=0;j<KS/4;j++)bytes[j]=*((device const uchar4*)(w+expert_byte_offset<Layout>(row,block+j*4,k)));scale=bf(s[(row/128)*(k/128)+block/128]);}
         for(uint j=0;j<KS/4;j++)*((threadgroup half4*)(stage+buffer*32*KS+lane*KS+j*4))=row<n?half4(f8x4(bytes[j])*scale):half4(0);
         simdgroup_barrier(mem_flags::mem_threadgroup);
         if(Prefetch&&block+KS<k&&row<n){
-            for(uint j=0;j<KS/4;j++)bytes[j]=*((device const uchar4*)(w+row*k+block+KS+j*4));
+            for(uint j=0;j<KS/4;j++)bytes[j]=*((device const uchar4*)(w+expert_byte_offset<Layout>(row,block+KS+j*4,k)));
             if((block+KS)%128==0)scale=bf(s[(row/128)*(k/128)+(block+KS)/128]);
         }
         auto a=full.slice<KS,Rows>(int(block),0);
@@ -1234,7 +1249,7 @@ inline void expert_staged_accumulate(device half*x,device const uchar*w,device c
     simdgroup_barrier(mem_flags::mem_threadgroup);
 }
 
-template<int Rows, int KS, bool Prefetch, bool Fused>
+template<int Rows, int KS, bool Prefetch, bool Fused, int Layout>
 inline void expert_staged_run(device half*x,device const uchar*raw,device const Expert*experts,
     device const ExpertTile*tiles,device float*y,constant P&p,uint3 group,uint lane,uint sid,threadgroup half*stage){
     ExpertTile tile=tiles[group.y];Expert d=experts[tile.expert];
@@ -1248,7 +1263,7 @@ inline void expert_staged_run(device half*x,device const uchar*raw,device const 
     auto b=tensor(stage,extents<int,KS,32>{},array<int,2>{1,KS});
     auto acc=op.template get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
     for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
-    expert_staged_accumulate<Rows,KS,Prefetch>(x+tile.first*p.k,raw+wo,(device const ushort*)(raw+so),p.k,p.n,column,tile.count,lane,stage+sid*64*KS,acc);
+    expert_staged_accumulate<Rows,KS,Prefetch,Layout>(x+tile.first*p.k,raw+wo,(device const ushort*)(raw+so),p.k,p.n,column,tile.count,lane,stage+sid*64*KS,acc);
     if constexpr(Fused){
         threadgroup float*gate=(threadgroup float*)stage;
         if(sid==0)for(uint i=0;i<acc.get_capacity();++i){if(!acc.is_valid_element(i))continue;auto c=acc.get_multidimensional_index(i);gate[c[1]*32+c[0]]=acc[i];}
@@ -1258,14 +1273,14 @@ inline void expert_staged_run(device half*x,device const uchar*raw,device const 
         for(uint i=0;i<acc.get_capacity();++i){if(!acc.is_valid_element(i))continue;auto c=acc.get_multidimensional_index(i);if(c[1]<tile.count&&column+c[0]<p.n)y[(tile.first+c[1])*p.n+column+c[0]]=acc[i];}
     }
 }
-template<bool Prefetch,bool Fused,int KS=32>
+template<bool Prefetch,bool Fused,int KS=32,int Layout=0>
 kernel void expert_staged(device half*x [[buffer(0)]],device const uchar*raw [[buffer(1)]],device const Expert*experts [[buffer(2)]],device const ExpertTile*tiles [[buffer(3)]],device const uint*tileCount [[buffer(4)]],device float*y [[buffer(5)]],constant P&p [[buffer(15)]],uint3 group [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]],uint sid [[simdgroup_index_in_threadgroup]]){
     if(group.y>=tileCount[0])return;
     threadgroup half stage[128*KS];
     uint rows=tiles[group.y].count;
-    if(rows<=8)expert_staged_run<8,KS,Prefetch,Fused>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
-    else if(rows<=16)expert_staged_run<16,KS,Prefetch,Fused>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
-    else expert_staged_run<32,KS,Prefetch,Fused>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
+    if(rows<=8)expert_staged_run<8,KS,Prefetch,Fused,Layout>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
+    else if(rows<=16)expert_staged_run<16,KS,Prefetch,Fused,Layout>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
+    else expert_staged_run<32,KS,Prefetch,Fused,Layout>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
 }
 template [[host_name("expert_matrix_staged")]] kernel decltype(expert_staged<false,false>) expert_staged<false,false>;
 template [[host_name("expert_matrix_pipeline")]] kernel decltype(expert_staged<true,false>) expert_staged<true,false>;
@@ -1299,3 +1314,12 @@ template [[host_name("expert_matrix_staged64")]] kernel decltype(expert_staged<f
 template [[host_name("expert_matrix_staged128")]] kernel decltype(expert_staged<false,false,128>) expert_staged<false,false,128>;
 template [[host_name("expert_gate_up_staged64")]] kernel decltype(expert_staged<false,true,64>) expert_staged<false,true,64>;
 template [[host_name("expert_gate_up_staged128")]] kernel decltype(expert_staged<false,true,128>) expert_staged<false,true,128>;
+
+template [[host_name("expert_matrix_layout1")]] kernel decltype(expert_staged<false,false,32,1>) expert_staged<false,false,32,1>;
+template [[host_name("expert_gate_up_layout1")]] kernel decltype(expert_staged<false,true,32,1>) expert_staged<false,true,32,1>;
+template [[host_name("expert_matrix_layout1_pipeline")]] kernel decltype(expert_staged<true,false,32,1>) expert_staged<true,false,32,1>;
+template [[host_name("expert_gate_up_layout1_pipeline")]] kernel decltype(expert_staged<true,true,32,1>) expert_staged<true,true,32,1>;
+template [[host_name("expert_matrix_layout2")]] kernel decltype(expert_staged<false,false,32,2>) expert_staged<false,false,32,2>;
+template [[host_name("expert_gate_up_layout2")]] kernel decltype(expert_staged<false,true,32,2>) expert_staged<false,true,32,2>;
+template [[host_name("expert_matrix_layout2_pipeline")]] kernel decltype(expert_staged<true,false,32,2>) expert_staged<true,false,32,2>;
+template [[host_name("expert_gate_up_layout2_pipeline")]] kernel decltype(expert_staged<true,true,32,2>) expert_staged<true,true,32,2>;
