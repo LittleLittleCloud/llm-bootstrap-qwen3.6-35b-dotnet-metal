@@ -53,11 +53,11 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
         if (command == "moe-self-tests") {
             if (engine.ValidateDelta) {
-                string prompt = File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required for model DeltaNet validation"));
+                string validationPrompt = File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required for model DeltaNet validation"));
                 string expected = Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required");
-                var result = engine.Generate(engine.Tokenizer.SimpleChat(prompt), 32, false);
-                if (result.Text.Trim() != expected) throw new Exception("Delta model validation failed the full answer");
-                Console.WriteLine(JsonSerializer.Serialize(new { type = "delta_model_answer", text = result.Text, passed = true }));
+                var validationResult = engine.Generate(engine.Tokenizer.SimpleChat(validationPrompt), 32, false);
+                if (validationResult.Text.Trim() != expected) throw new Exception("Delta model validation failed the full answer");
+                Console.WriteLine(JsonSerializer.Serialize(new { type = "delta_model_answer", text = validationResult.Text, passed = true }));
                 engine.ValidateDelta = false;
             }
             engine.VerificationSelfTest(); engine.PrefixCachingEnabled = true; engine.ClearPrefixCache(); PrefixCacheSelfTest.Run(engine);
