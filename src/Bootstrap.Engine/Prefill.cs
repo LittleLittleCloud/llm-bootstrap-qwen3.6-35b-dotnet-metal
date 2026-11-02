@@ -3,6 +3,7 @@ namespace Bootstrap.Engine;
 internal sealed partial class QwenEngine
 {
     string deltaMode = "baseline";
+    public bool ValidateDelta { get; set; }
     public string DeltaMode
     {
         get => deltaMode;
@@ -81,7 +82,7 @@ internal sealed partial class QwenEngine
     sealed class BatchBuffers
     {
         public readonly int Capacity;
-        public GpuBuffer? DeltaGates, PackedInputs, PackedWeights, PackedExpertInputs, PackedExpertWeights;
+        public GpuBuffer? DeltaGates, DeltaReferenceState, DeltaReferenceOutput, PackedInputs, PackedWeights, PackedExpertInputs, PackedExpertWeights;
         public readonly GpuBuffer Tokens, Hidden, Norm, Projection, Qkv, Z, A, B, Conv, Q, K, V, Rotated, Qgate, Scores, Router, Ids, Rates, Counts, Offsets, Tiles, TileCount, SortedTokens, Inverse, ExpertGate, ExpertUp, ExpertActivation, ExpertOutput, SharedGate, SharedUp, SharedActivation, SharedOutput, SharedWeight;
         public BatchBuffers(QwenEngine engine)
         {
@@ -134,6 +135,10 @@ internal sealed partial class QwenEngine
         ActiveDraft?.EnsureFeatureCapacity(count);
         bool optimizedDelta = !verify && count > VerificationCapacity && DeltaMode != "baseline";
         if (optimizedDelta) b.DeltaGates ??= Buffer(b.Capacity * 64);
+        if (optimizedDelta && ValidateDelta) {
+            b.DeltaReferenceState ??= Buffer(524288);
+            b.DeltaReferenceOutput ??= Buffer(b.Capacity * 4096);
+        }
         if (!verify && (AttentionMode is "fp16-device" or "fp16-online")) { deviceAttention ??= new(gpu); deviceAttention.Prepare(count, position + count, HalfKv, AttentionMode == "fp16-online"); }
         gpu.Begin();
         gpu.Dispatch("batch_embedding", new() { M = (uint)count }, checked((uint)count * Hidden), 128, weights["model.language_model.embed_tokens.weight"].Binding, b.Tokens, b.Hidden);
@@ -147,9 +152,17 @@ internal sealed partial class QwenEngine
                 gpu.Dispatch("batch_conv", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 8192, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv, verify ? verification!.Convolution[layer] : dummy);
                 gpu.Dispatch("batch_l2", new() { M = (uint)count }, checked((uint)count * 16 * 128), 128, b.Conv, b.Q, b.K);
                 if (optimizedDelta) {
+                    if (ValidateDelta) gpu.Dispatch("copy_floats", new() { N = 524288 }, 524288, 128, state[layer], b.DeltaReferenceState!);
                     gpu.Dispatch("delta_prepare_gates", new() { M = (uint)count }, (uint)count * 32, 128, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, b.DeltaGates!);
                     if (DeltaMode == "gates") gpu.Dispatch("batch_delta_gates", new() { M = (uint)count }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, state[layer], b.Rotated, dummy, b.DeltaGates!);
                     else gpu.Dispatch("delta_" + DeltaMode, new() { M = (uint)count }, 32 * 8 * 128, 128, b.Q, b.K, b.Conv, b.DeltaGates!, state[layer], b.Rotated);
+                    if (ValidateDelta) {
+                        gpu.Dispatch("batch_delta", new() { M = (uint)count }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, b.DeltaReferenceState!, b.DeltaReferenceOutput!, dummy);
+                        gpu.End();
+                        ValidateDeltaValues(b.Rotated, b.DeltaReferenceOutput!, count * 4096, layer, count, "output");
+                        ValidateDeltaValues(state[layer], b.DeltaReferenceState!, 524288, layer, count, "state");
+                        gpu.Begin();
+                    }
                 } else
                 gpu.Dispatch("batch_delta", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, state[layer], b.Rotated, verify ? verification!.State[layer] : dummy);
                 Normalize(b.Rotated, path + ".norm", b.Rotated, 128, checked((uint)count * 32), false, b.Z);
@@ -268,5 +281,17 @@ internal sealed partial class QwenEngine
             SelectNext(ignoreEos);
         }
         gpu.End(); return output && !verify ? next.Values<int>(1)[0] : -1;
+    }
+
+    static void ValidateDeltaValues(GpuBuffer output, GpuBuffer reference, int length, int layer, int tokens, string kind)
+    {
+        var actual = output.Values<float>(length); var expected = reference.Values<float>(length);
+        double worst = 0, error2 = 0, reference2 = 0;
+        for (int i = 0; i < length; i++) {
+            double error = Math.Abs((double)actual[i] - expected[i]);
+            if (!float.IsFinite(actual[i]) || !float.IsFinite(expected[i]) || error > .001 + .0003 * Math.Abs(expected[i])) throw new Exception($"Delta model {kind} mismatch at layer {layer}, index {i}: {actual[i]} vs {expected[i]}");
+            worst = Math.Max(worst, error); error2 += error * error; reference2 += (double)expected[i] * expected[i];
+        }
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { type = "delta_model_check", layer, tokens, kind, max_abs_error = worst, relative_l2_error = Math.Sqrt(error2 / Math.Max(reference2, 1e-30)) }));
     }
 }

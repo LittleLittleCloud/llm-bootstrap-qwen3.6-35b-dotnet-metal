@@ -43,6 +43,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.CausalDeviceAttention = tunedPrefill || args.Contains("--causal-attention");
         engine.GatheredExperts = args.Contains("--gathered-experts") || (tunedPrefill && !args.Contains("--predecoded-experts"));
         engine.DeltaMode = Option("--delta-mode") ?? "baseline";
+        engine.ValidateDelta = args.Contains("--validate-delta");
         engine.ExpertKernel = Option("--expert-kernel") ?? (tunedPrefill ? "fused" : "baseline");
         engine.ParallelExpertRouting = args.Contains("--parallel-expert-routing") || (tunedPrefill && !args.Contains("--serial-expert-routing"));
         engine.PredecodedExperts = args.Contains("--predecoded-experts");
