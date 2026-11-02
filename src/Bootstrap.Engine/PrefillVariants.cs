@@ -12,8 +12,9 @@ internal sealed partial class QwenEngine
 
     // Alternate configuration order; warm timings exclude model load and tokenization.
     public void ComparePrefillVariants(string prompt, int runs, string expectedAnswer, bool fast = false,
-        bool projections = false, bool batches = false, bool tuned = false, bool experts = false, bool final = false, bool throughput = false, bool online = false, bool moe = false)
+        bool projections = false, bool batches = false, bool tuned = false, bool experts = false, bool final = false, bool throughput = false, bool online = false, bool moe = false, bool moeFinal = false)
     {
+        moe |= moeFinal;
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
         if (new[] { fast, projections, batches, tuned, experts, final, throughput, online, moe }.Count(x => x) > 1) throw new ArgumentException("Select one comparison family");
         PrefillVariant[] variants = moe ? [
@@ -59,6 +60,7 @@ internal sealed partial class QwenEngine
             new("legacy+tiled_attention", "legacy", "tiled", false),
             new("fp16+tiled_attention", "fp16", "tiled", false), new("bf16+tiled_attention", "bf16", "tiled", false)
         ];
+        if (moeFinal) variants = [variants[0], variants[3]];
         PrefillBatchSize = variants.Max(v => v.Batch); // Reserve once for all paired candidates.
         string Name(PrefillVariant variant) => variant.Name;
         void Configure(PrefillVariant variant)
@@ -118,7 +120,7 @@ internal sealed partial class QwenEngine
                 int nonfinite = 0; foreach (float value in logits.Values<float>(Vocabulary)) if (!float.IsFinite(value)) nonfinite++;
                 if (nonfinite != 0) throw new Exception($"{name} produced nonfinite long-prompt logits");
                 Console.WriteLine(JsonSerializer.Serialize(new { type = "prefill_variant", run, variant = name,
-                    mode = run == 0 ? "cold_full_answer" : "warm_uncached", projection_precision = variant.Precision, tiled_attention = variant.Attention != "legacy", attention_mode = variant.Attention, wide_prefill = WidePrefill, optimized_projections = OptimizedProjections, predecoded_projections = PredecodedProjections, predecoded_experts = PredecodedExperts, gathered_experts = GatheredExperts, causal_device_attention = CausalDeviceAttention, adaptive_expert_tiles = AdaptiveExpertTiles, prefill_batch_size = PrefillBatchSize, expert_tile_rows = ExpertTileRows,
+                    mode = run == 0 ? "cold_full_answer" : "warm_uncached", projection_precision = variant.Precision, tiled_attention = variant.Attention != "legacy", attention_mode = variant.Attention, wide_prefill = WidePrefill, optimized_projections = OptimizedProjections, predecoded_projections = PredecodedProjections, predecoded_experts = PredecodedExperts, gathered_experts = GatheredExperts, causal_device_attention = CausalDeviceAttention, adaptive_expert_tiles = AdaptiveExpertTiles, prefill_batch_size = PrefillBatchSize, expert_tile_rows = ExpertKernel == "baseline" ? ExpertTileRows : 32, expert_kernel = ExpertKernel, parallel_expert_routing = ParallelExpertRouting,
                     wall_ms = wall, process_cpu_ms = cpuMs, prompt_tokens = tokens.Length,
                     prefill_tokens_per_second = run == 0 ? (double?)null : tokens.Length / (wall / 1000),
                     first_token = first, first_token_matches_baseline = first == firstTokens[Name(variants[0])],

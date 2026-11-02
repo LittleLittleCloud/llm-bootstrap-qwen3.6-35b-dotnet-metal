@@ -66,7 +66,7 @@ internal sealed partial class QwenEngine
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
         var timer = Stopwatch.StartNew();
         var tokens = Tokenizer.SimpleChat(prompt);
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", kv_cache_precision = KvCachePrecision, fp32_tensorops = Fp32TensorOps, projection_precision = TensorOpsPrecision, attention_mode = AttentionMode, wide_prefill = WidePrefill, prompt_tokens = tokens.Length,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", kv_cache_precision = KvCachePrecision, fp32_tensorops = Fp32TensorOps, projection_precision = TensorOpsPrecision, expert_kernel = ExpertKernel, parallel_expert_routing = ParallelExpertRouting, attention_mode = AttentionMode, wide_prefill = WidePrefill, prompt_tokens = tokens.Length,
             tokenizer_wall_ms = timer.Elapsed.TotalMilliseconds, context_window = ContextWindow,
             prefix_caching = PrefixCachingEnabled, draft_enabled = draft is not null,
             sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))) }));

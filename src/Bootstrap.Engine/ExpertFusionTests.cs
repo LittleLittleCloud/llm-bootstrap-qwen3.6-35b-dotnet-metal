@@ -30,7 +30,7 @@ internal static class ExpertFusionTests
             void Encode(string variant,int nt){
                 bool old=variant=="baseline";var p=new KernelArgs{M=(uint)rows,N=n,K=k,Flags=1};
                 gpu.Begin();
-                if(variant.StartsWith("fused"))gpu.Dispatch2D(variant=="fused"?"expert_gate_up_staged":"expert_gate_up_pipeline",p,n/32*64,(uint)(nt+1),64,packed,raw,descriptors,tiles,tileCount,output);
+                if(variant.StartsWith("fused"))gpu.Dispatch2D(variant=="fused_pipeline"?"expert_gate_up_pipeline":"expert_gate_up_staged"+variant[5..],p,n/32*64,(uint)(nt+1),64,packed,raw,descriptors,tiles,tileCount,output);
                 else{
                     string kernel=old?"expert_matrix_gathered":"expert_matrix_staged";uint threads=old?128u:64u;
                     gpu.Dispatch2D(kernel,p,n/64*threads,(uint)(nt+1),threads,packed,raw,descriptors,tiles,tileCount,gate);
@@ -40,7 +40,7 @@ internal static class ExpertFusionTests
                 }
                 gpu.End();
             }
-            foreach(string variant in new[]{"baseline","staged","fused","fused_pipeline"}){
+            foreach(string variant in new[]{"baseline","staged","fused","fused_pipeline","fused64","fused128"}){
                 int nt=Setup(variant=="baseline"?64:32);output.Values<Half>(rows*n+1).Fill(Half.NaN);baseline.Values<Half>(rows*n+1)[rows*n]=Half.NaN;
                 Encode(variant,nt);
                 if(variant=="baseline"){
