@@ -422,3 +422,77 @@ accuracy tradeoffs from rounded operands are intentional.
 The final `--fast-prefill` preset passed 45 verifier state/rollback checks at
 widths 1/2/4/8 and all 1,659 existing kernel checks. Verification output records
 FP16 projections, FP16 attention and wide batches to confirm preset selection.
+
+## Tuned prefill
+
+The opt-in `--tuned-prefill` preset uses 2048-token model batches, 64-row grouped
+expert tiles, and FP16 device-tensor attention. Dense projection weights are
+unpacked into reusable FP16 scratch once per projection, so each output tile
+does not repeat FP8 conversion. Expert projections retain inline conversion,
+with row-major staging and direct accumulator writes. FP32 accumulation,
+softmax, KV storage, and the original checkpoint files are retained. Small
+speculative verification uses the existing FP32 attention kernels. The previous
+`--fast-prefill` preset and the default engine configuration remain available.
+
+On the M5 Pro, alternating three warm uncached runs of the same 10,520-token
+public prompt produced the following medians. Model loading and tokenization
+are excluded, and both variants reserve the largest comparison workspace.
+
+| Configuration | Prefill wall time | Prefill tok/s | 1K decode tok/s |
+| --- | ---: | ---: | ---: |
+| Previous `--fast-prefill` | 16.626 s | 632.76 | 27.74 |
+| New `--tuned-prefill` | 8.307 s | 1266.42 | 27.33 |
+
+This is **2.001x** faster prefill; the requested additional 5x is not achieved.
+New warm prefill times ranged from 8.284 to 8.309 s. Both modes returned the
+complete expected needle answer, `73DY-DRV5-B8FJ`, and passed an arithmetic
+smoke. Decode remains around 27–28 tok/s (the new mode was 1.5% slower in this
+run); this change does not resolve the earlier decode regression. Each measured
+decode run generated 1000 tokens with 453 speculation cycles and 545 accepted
+draft tokens. These are local development diagnostics, not a new endpoint-bench
+evaluation or a leaderboard submission.
+
+The selected kernels passed 47,258 matrix checks against independently rounded
+CPU references, including FP32 accumulation checks; nine attention shapes up to
+32K total context passed CPU-reference and output-alias checks. The engine also
+passed 1,659 existing kernel checks, 45 verifier state/rollback checks, and 48
+prefix-cache checks, including append and branching across KV-buffer growth.
+These checks do not replace a broader quality evaluation of reduced precision.
+
+Use `--tuned-prefill` with `generate` or `serve`. To reproduce the paired
+diagnostics with the public prompt, set `TARGET`, `DRAFT`, and `PROMPT` to local
+paths, then run:
+
+```sh
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll \
+  compare-prefill-variants --model-dir "$TARGET" --draft-dir "$DRAFT" \
+  --prompt-file "$PROMPT" --expected-answer 73DY-DRV5-B8FJ \
+  --context-window 32768 --runs 3 --final-variants
+```
+
+This command also runs the paired decode diagnostic and selected-mode verifier
+and prefix-cache checks. Raw measurements, resource samples, shader/source
+snapshots and their hashes are retained locally in `artifacts/fast-prefill-next/`.
+Run `python3 scripts/summarize-prefill-tuning.py artifacts/fast-prefill-next` to
+summarize the saved final results. The selected run reported about 40.1 GB of
+Metal buffers after cache tests. System-wide swap was active during this run;
+resource samples are not evidence of zero memory pressure.
+
+`--prefill-batch-size` (32–2048) and `--expert-tile-rows` (16/32/64) allow smaller
+workspaces and tile experiments. Set the maximum batch size before the first
+generation. Explicit precision/attention arguments override preset choices.
+`--predecoded-experts` remains an experimental comparison path: unpacking all
+expert weights was slower (about 1043 versus 1268 tok/s in candidate screening)
+and is **not** enabled by the preset.
+
+The final all-kernel profile identifies grouped expert matmul as the largest
+remaining cost (3.715 s), followed by attention including conversion/softmax
+(1.413 s), dense projection including conversion (1.293 s), and recurrent delta
+(0.861 s). Instrumented command-buffer GPU time was 9.080 s. Encoder timestamp
+sampling increased wall time from 8.315 to 9.280 s (+11.6%), so these component
+times are diagnostic and are not substituted for the paired throughput above.
+Large commands require multiple timestamp buffers: the profiler now uses eight
+4096-sample buffers because the device rejects a larger individual buffer.
+The completed run is `profile-after-multi-buffer.jsonl`; earlier capacity-error
+attempts are retained separately with stderr. The profiling change leaves the
+shader and model arithmetic used by the completed validation unchanged.

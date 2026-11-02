@@ -5,11 +5,12 @@ namespace Bootstrap.Engine;
 
 internal static class FastAttentionTests
 {
-    public static void Run(string source, int repeats)
+    public static void Run(string source, int repeats, bool tiles = false)
     {
         if (repeats < 1) throw new ArgumentOutOfRangeException(nameof(repeats));
         using var gpu = new Metal(source);
-        foreach (var (history, rows) in new[] { (0, 1), (17, 7), (0, 512), (1024, 512), (10520, 190), (32768, 63), (10520, 512) })
+        using var deviceAttention = new DeviceAttentionWorkspace(gpu);
+        foreach (var (history, rows) in new[] { (0, 1), (17, 7), (0, 512), (1024, 512), (10520, 190), (32768, 63), (10520, 512), (10520, 2048), (30000, 2048) })
         {
             int length = history + rows;
             using var q = gpu.Allocate((ulong)rows * 4096 * 4);
@@ -23,14 +24,16 @@ internal static class FastAttentionTests
             Fill(v, length * 512, 23, 1); Fill(gate, rows * 4096, 11, 1);
             var p = new KernelArgs { M = (uint)rows, Position = (uint)history, K = (uint)length };
             var softmax = p; softmax.Position = (uint)(length - 1);
-            foreach (string mode in new[] { "tiled", "fp16", "fused-fp16", "fused-fp16-128" })
+            deviceAttention.Prepare(rows, length);
+            foreach (string mode in (tiles ? new[] { "fp16", "fp16_opt64", "fp16-device" } : new[] { "tiled", "fp16", "fused-fp16", "fused-fp16-128" }))
             {
                 void Encode(GpuBuffer input, GpuBuffer destination)
                 {
-                    if (mode.StartsWith("fused")) gpu.Dispatch2D(mode.EndsWith("128") ? "batch_attention_fused_fp16_bk128" : "batch_attention_fused_fp16", p, (uint)((rows + 15) / 16) * 128, 16, 128, input, k, v, gate, destination);
+                    if (mode == "fp16-device") deviceAttention.Encode(input, k, v, gate, scores, destination, rows, history);
+                    else if (mode.StartsWith("fused")) gpu.Dispatch2D(mode.EndsWith("128") ? "batch_attention_fused_fp16_bk128" : "batch_attention_fused_fp16", p, (uint)((rows + 15) / 16) * 128, 16, 128, input, k, v, gate, destination);
                     else
                     {
-                        string suffix = mode == "fp16" ? "_fp16" : "";
+                        string suffix = mode.StartsWith("fp16") ? "_" + mode : "";
                         int capacity = ContextLimits.AttentionWorkspaceFloats / 16 / length;
                         for (int first = 0; first < rows; first += capacity)
                         {
@@ -94,7 +97,7 @@ internal static class FastAttentionTests
                     for (int t = 0; t < logits.Length; t++)
                     {
                         double prob = Math.Exp(logits[t] - max) / sum;
-                        if (mode == "fp16") prob = (float)(Half)(float)prob;
+                        if (mode.StartsWith("fp16")) prob = (float)(Half)(float)prob;
                         expected += prob * Round(vs[t * 512 + head / 8 * 256 + d]);
                     }
                 }

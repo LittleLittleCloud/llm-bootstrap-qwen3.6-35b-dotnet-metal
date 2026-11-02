@@ -7,25 +7,60 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
-    // Paired development experiment: keep checkpoints, batch geometry and model
-    // weights fixed; vary projection operand precision and attention tiling only.
-    public void ComparePrefillVariants(string prompt, int runs, string expectedAnswer, bool fast = false)
+    sealed record PrefillVariant(string Name, string Precision, string Attention, bool Wide,
+        bool Optimized = false, int Batch = 512, int Tile = 16, bool Predecoded = false, bool ExpertPredecoded = false);
+
+    // Alternate configuration order; warm timings exclude model load and tokenization.
+    public void ComparePrefillVariants(string prompt, int runs, string expectedAnswer, bool fast = false,
+        bool projections = false, bool batches = false, bool tuned = false, bool experts = false, bool final = false)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
-        var variants = fast
-            ? new[] { ("fp16", "tiled", false), ("fp16", "fp16", false), ("fp16", "fp16", true), ("fp16", "fused-fp16", true) }
-            : new[] { ("legacy", "legacy", false), ("fp16", "legacy", false), ("bf16", "legacy", false), ("legacy", "tiled", false), ("fp16", "tiled", false), ("bf16", "tiled", false) };
-        string Name((string precision, string attention, bool wide) variant) => variant.precision + (variant.attention == "legacy" ? "" : "+" + variant.attention + "_attention") + (variant.wide ? "+wide" : "");
-        void Configure((string precision, string attention, bool wide) variant)
+        if (new[] { fast, projections, batches, tuned, experts, final }.Count(x => x) > 1) throw new ArgumentException("Select one comparison family");
+        PrefillVariant[] variants = final ? [
+            new("previous_fast_prefill", "fp16", "fp16", true),
+            new("tuned_prefill", "fp16", "fp16-device", true, true, 2048, 64, true)
+        ] : experts ? [
+            new("predecoded_dense", "fp16", "fp16-opt", true, true, 2048, 64, true),
+            new("device_attention_dense", "fp16", "fp16-device", true, true, 2048, 64, true),
+            new("device_attention_dense_experts", "fp16", "fp16-device", true, true, 2048, 64, true, true)
+        ] : tuned ? [
+            new("previous_fast_prefill", "fp16", "fp16", true),
+            new("tuned512", "fp16", "fp16-opt", true, true),
+            new("tuned1024", "fp16", "fp16-opt", true, true, 1024, 32),
+            new("tuned2048", "fp16", "fp16-opt", true, true, 2048, 64),
+            new("predecoded2048", "fp16", "fp16-opt", true, true, 2048, 64, true)
+        ] : batches ? [
+            new("batch512_tile16", "fp16", "fp16", true, true),
+            new("batch1024_tile32", "fp16", "fp16", true, true, 1024, 32),
+            new("batch2048_tile64", "fp16", "fp16", true, true, 2048, 64)
+        ] : projections ? [
+            new("previous_fast_prefill", "fp16", "fp16", true),
+            new("optimized_projections", "fp16", "fp16", true, true)
+        ] : fast ? [
+            new("fp16+tiled_attention", "fp16", "tiled", false),
+            new("fp16+fp16_attention", "fp16", "fp16", false),
+            new("fp16+fp16_attention+wide", "fp16", "fp16", true),
+            new("fp16+fused-fp16_attention+wide", "fp16", "fused-fp16", true)
+        ] : [
+            new("legacy", "legacy", "legacy", false),
+            new("fp16", "fp16", "legacy", false), new("bf16", "bf16", "legacy", false),
+            new("legacy+tiled_attention", "legacy", "tiled", false),
+            new("fp16+tiled_attention", "fp16", "tiled", false), new("bf16+tiled_attention", "bf16", "tiled", false)
+        ];
+        PrefillBatchSize = variants.Max(v => v.Batch); // Reserve once for all paired candidates.
+        string Name(PrefillVariant variant) => variant.Name;
+        void Configure(PrefillVariant variant)
         {
-            TensorOpsPrecision = variant.precision; AttentionMode = variant.attention; WidePrefill = variant.wide; ClearPrefixCache();
+            TensorOpsPrecision = variant.Precision; AttentionMode = variant.Attention; WidePrefill = variant.Wide;
+            OptimizedProjections = variant.Optimized; PredecodedProjections = variant.Predecoded; PredecodedExperts = variant.ExpertPredecoded; PrefillBatchSize = variant.Batch; ExpertTileRows = variant.Tile;
+            ClearPrefixCache();
         }
         var tokens = Tokenizer.SimpleChat(prompt);
         Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", prompt_tokens = tokens.Length,
             context_window = ContextWindow, prefix_caching = PrefixCachingEnabled, draft_enabled = draft is not null,
             sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))),
             expected_answer = expectedAnswer, variants = variants.Select(Name), runs,
-            projection_tiles = "unchanged", attention_precision = fast ? "varies by variant" : "FP32", accumulation = "FP32" }));
+            configurations = variants, accumulation = "FP32" }));
         var smoke = Tokenizer.SimpleChat(string.Concat(Enumerable.Repeat("This sentence is harmless context. ", 100)) + "Reply with only the number: what is 2 + 2?");
         float[]? reference = null;
         foreach (var variant in variants)
@@ -65,13 +100,19 @@ internal sealed partial class QwenEngine
                 int nonfinite = 0; foreach (float value in logits.Values<float>(Vocabulary)) if (!float.IsFinite(value)) nonfinite++;
                 if (nonfinite != 0) throw new Exception($"{name} produced nonfinite long-prompt logits");
                 Console.WriteLine(JsonSerializer.Serialize(new { type = "prefill_variant", run, variant = name,
-                    mode = run == 0 ? "cold_full_answer" : "warm_uncached", projection_precision = variant.Item1, tiled_attention = variant.Item2 != "legacy", attention_mode = variant.Item2, wide_prefill = variant.Item3,
+                    mode = run == 0 ? "cold_full_answer" : "warm_uncached", projection_precision = variant.Precision, tiled_attention = variant.Attention != "legacy", attention_mode = variant.Attention, wide_prefill = WidePrefill, optimized_projections = OptimizedProjections, predecoded_projections = PredecodedProjections, predecoded_experts = PredecodedExperts, prefill_batch_size = PrefillBatchSize, expert_tile_rows = ExpertTileRows,
                     wall_ms = wall, process_cpu_ms = cpuMs, prompt_tokens = tokens.Length,
                     prefill_tokens_per_second = run == 0 ? (double?)null : tokens.Length / (wall / 1000),
                     first_token = first, first_token_matches_baseline = first == firstTokens[Name(variants[0])],
                     text = run == 0 ? result.Text : null, answer_correct = run == 0 ? result.Text.Trim() == expectedAnswer : (bool?)null,
                     generated_tokens = result.Tokens.Length, metal_buffer_bytes = AllocatedBytes, timing = gpu.ReadWallTiming() }));
             }
+        }
+        if (final)
+        {
+            CompareDecodeVariants(runs);
+            Configure(variants[1]); VerificationSelfTest();
+            PrefixCachingEnabled = true; ClearPrefixCache(); PrefixCacheSelfTest.Run(this);
         }
     }
 }

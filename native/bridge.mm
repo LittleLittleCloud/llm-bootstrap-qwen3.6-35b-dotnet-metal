@@ -13,6 +13,11 @@
 
 static double wall_now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
+// Metal limits each timestamp buffer to 4096 samples on this device.
+// Use multiple buffers for large prefill commands, without splitting GPU work.
+static constexpr NSUInteger timestamp_samples_per_buffer = 4096;
+static constexpr NSUInteger timestamp_buffer_count = 8;
+
 // Original platform-only interop. All model operators are in kernels.metal.
 struct Context {
     id<MTLDevice> device;
@@ -28,7 +33,7 @@ struct Context {
     double wall[7]={}; // GPU seconds, encoding seconds, commit seconds, wait seconds, commands, dispatches, sample-resolution seconds
     double attention[6]={}; // QK/softmax/AV seconds, followed by their counts
     double begin_time=0;
-    id<MTLCounterSampleBuffer> samples;
+    NSMutableArray<id<MTLCounterSampleBuffer>> *samples;
     std::vector<int> sample_kinds;
     std::vector<std::string> sample_names;
     std::unordered_map<std::string,std::pair<double,uint64_t>> kernel_wall;
@@ -60,9 +65,14 @@ int boot_wall_reset(void *handle,int sample_attention) { @autoreleasepool {
         if(![c->device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]){c->error="Stage timestamp counters unsupported";return 0;}
         for(id<MTLCounterSet> set in c->device.counterSets)if([set.name isEqualToString:MTLCommonCounterSetTimestamp]){
             MTLCounterSampleBufferDescriptor *desc=[MTLCounterSampleBufferDescriptor new];
-            desc.counterSet=set;desc.storageMode=MTLStorageModeShared;desc.sampleCount=4096;
-            NSError *error=nil;c->samples=[c->device newCounterSampleBufferWithDescriptor:desc error:&error];
-            if(!c->samples){c->error=error.description.UTF8String;return 0;}break;
+            desc.counterSet=set;desc.storageMode=MTLStorageModeShared;desc.sampleCount=timestamp_samples_per_buffer;
+            c->samples=[NSMutableArray new];
+            for(NSUInteger i=0;i<timestamp_buffer_count;i++){
+                NSError *error=nil;id<MTLCounterSampleBuffer> buffer=[c->device newCounterSampleBufferWithDescriptor:desc error:&error];
+                if(!buffer){c->samples=nil;c->error=error.description.UTF8String;return 0;}
+                [c->samples addObject:buffer];
+            }
+            break;
         }
         if(!c->samples){c->error="Timestamp counter set unavailable";return 0;}
     }
@@ -128,16 +138,17 @@ int boot_dispatch(void *handle,const char *name,void **buffers,const uint64_t *o
     } else pipeline=found->second;
     int sample_kind=-1;
     if(c->attention_samples){
-        if((std::string(name)=="batch_attention_scores" || std::string(name)=="batch_attention_scores_tiled" || std::string(name)=="batch_attention_scores_tiled_fp16"))sample_kind=0;
+        if((std::string(name)=="attention_scores_device" || std::string(name)=="batch_attention_scores" || std::string(name)=="batch_attention_scores_tiled" || std::string(name)=="batch_attention_scores_tiled_fp16" || std::string(name)=="batch_attention_scores_tiled_fp16_opt64"))sample_kind=0;
         else if(std::string(name)=="attention_softmax")sample_kind=1;
-        else if((std::string(name)=="batch_attention_values" || std::string(name)=="batch_attention_values_tiled" || std::string(name)=="batch_attention_values_tiled_fp16"))sample_kind=2;
+        else if((std::string(name)=="attention_values_device" || std::string(name)=="batch_attention_values" || std::string(name)=="batch_attention_values_tiled" || std::string(name)=="batch_attention_values_tiled_fp16" || std::string(name)=="batch_attention_values_tiled_fp16_opt64"))sample_kind=2;
     }
     if(c->all_samples || sample_kind>=0){
         if(c->encoder){[c->encoder endEncoding];c->encoder=nil;}
         NSUInteger at=c->sample_kinds.size()*2;
-        if(at+1>=4096){c->error="Timestamp sample capacity exceeded";return 0;}
+        if(at+1>=timestamp_samples_per_buffer*timestamp_buffer_count){c->error="Timestamp sample capacity exceeded";return 0;}
         MTLComputePassDescriptor *pass=[MTLComputePassDescriptor computePassDescriptor];
-        pass.sampleBufferAttachments[0].sampleBuffer=c->samples;
+        pass.sampleBufferAttachments[0].sampleBuffer=c->samples[at/timestamp_samples_per_buffer];
+        at%=timestamp_samples_per_buffer;
         pass.sampleBufferAttachments[0].startOfEncoderSampleIndex=at;
         pass.sampleBufferAttachments[0].endOfEncoderSampleIndex=at+1;
         c->encoder=[c->command computeCommandEncoderWithDescriptor:pass];c->sample_kinds.push_back(sample_kind);c->sample_names.emplace_back(name);
@@ -176,7 +187,13 @@ int boot_end(void *handle) { @autoreleasepool {
     if(!ok)c->error=c->command.error.description.UTF8String;
     if(ok && !c->sample_kinds.empty()){
         [c->device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
-        NSData *data=[c->samples resolveCounterRange:NSMakeRange(0,c->sample_kinds.size()*2)];
+        NSMutableData *data=[NSMutableData new];
+        NSUInteger total=c->sample_kinds.size()*2;
+        for(NSUInteger first=0;first<total;first+=timestamp_samples_per_buffer){
+            NSUInteger count=std::min(timestamp_samples_per_buffer,total-first);
+            NSData *part=[c->samples[first/timestamp_samples_per_buffer] resolveCounterRange:NSMakeRange(0,count)];
+            if(part)[data appendData:part];
+        }
         if(data.length!=c->sample_kinds.size()*2*sizeof(MTLCounterResultTimestamp) || gpu1<=gpu0 || cpu1<=cpu0){c->error="Invalid timestamp resolution";ok=false;}
         else {
             // sampleTimestamps CPU values are nanoseconds on this Metal API,

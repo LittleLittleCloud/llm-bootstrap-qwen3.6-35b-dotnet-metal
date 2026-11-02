@@ -38,7 +38,9 @@ internal sealed partial class QwenEngine
         readonly QwenEngine e;
         readonly Checkpoint weights;
         public readonly GpuBuffer Context;
-        readonly GpuBuffer features, projected, contextInput, contextK, contextV;
+        GpuBuffer features, projected;
+        int featureCapacity = 512;
+        readonly GpuBuffer contextInput, contextK, contextV;
         readonly GpuBuffer hidden, norm, prepared, dynamic, output, q, k, v, attention, scores, gate, up, activation, logits, selector, tokens, proposals;
         readonly GpuBuffer[] keys = new GpuBuffer[6], values = new GpuBuffer[6];
         int contextEnd, cachedThrough;
@@ -58,6 +60,12 @@ internal sealed partial class QwenEngine
             for (int l = 0; l < 6; l++) { keys[l] = B(Window * 1024); values[l] = B(Window * 1024); }
         }
         public void Reset(int position = 0) { contextEnd = position; cachedThrough = Math.Max(0, position - Window); }
+        public void EnsureFeatureCapacity(int count)
+        {
+            if (count <= featureCapacity) return;
+            features.Dispose(); projected.Dispose();
+            features = e.Buffer(count * Hidden * 8); projected = e.Buffer(count * Hidden); featureCapacity = count;
+        }
         public void Capture(int layer, GpuBuffer source, int count)
         {
             int feature = Array.IndexOf(FeatureLayers, layer);

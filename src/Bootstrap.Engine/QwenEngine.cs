@@ -167,7 +167,7 @@ internal sealed partial class QwenEngine : IDisposable
             {
                 cancellation.ThrowIfCancellationRequested();
                 int boundary = boundaries.First(p => p > position);
-                int count = WidePrefill ? Math.Min(BatchBuffers.Capacity, boundary - position) : ContextLimits.PrefillCount(position, boundary - position);
+                int count = WidePrefill ? Math.Min(PrefillBatchSize, boundary - position) : ContextLimits.PrefillCount(position, boundary - position);
                 bool checkpoint = position + count == boundary;
                 if (BatchedPrefill && count >= 8)
                 {
@@ -232,6 +232,6 @@ internal sealed partial class QwenEngine : IDisposable
             ClearPrefixCache(); throw;
         }
     }
-    public void Dispose() { draft?.Dispose(); foreach (var buffer in owned) buffer.Dispose(); weights.Dispose(); gpu.Dispose(); }
+    public void Dispose() { deviceAttention?.Dispose(); draft?.Dispose(); foreach (var buffer in owned) buffer.Dispose(); weights.Dispose(); gpu.Dispose(); }
 }
 internal sealed record Generation(string Text, int PromptTokens, int[] Tokens, string FinishReason, int CachedTokens = 0);

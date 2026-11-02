@@ -10,9 +10,10 @@ internal static class TensorOpsSelfTest
         return (b < 128 ? 1 : -1) * (e == 0 ? m / 512.0 : (1 + m / 8.0) * Math.Pow(2, e - 7));
     }
     static float Input(int i) => MathF.Sin(i * .731f) * .7f + (i % 7) * .000013f;
-    public static void Run(string source, string precision = "fp32")
+    public static void Run(string source, string precision = "fp32", bool optimized = false, int tileRows = 16, bool predecoded = false, bool expertPredecoded = false)
     {
         if (precision is not ("fp32" or "fp16" or "bf16")) throw new ArgumentException("Invalid test precision");
+        if (tileRows is not (16 or 32 or 64) || ((optimized || predecoded || expertPredecoded) && precision != "fp16")) throw new ArgumentException("Invalid optimized test configuration");
         float Round(float value) => precision == "fp16" ? (float)(Half)value : precision == "bf16"
             ? BitConverter.UInt32BitsToSingle((BitConverter.SingleToUInt32Bits(value) + 0x7fffu + ((BitConverter.SingleToUInt32Bits(value) >> 16) & 1)) & 0xffff0000u) : value;
         string suffix = precision == "fp32" ? "_mpp" : "_" + precision;
@@ -45,10 +46,16 @@ internal static class TensorOpsSelfTest
             string name = small ? "matrix_product_small" : "matrix_product";
             y.Values<float>(m * n + 1).Fill(float.NaN);
             var p = new KernelArgs { M = (uint)m, N = (uint)n, K = (uint)k, Kind = kind };
-            uint tx = small ? 128u : 256u, tm = small ? 16u : 32u, tn = small ? 32u : 64u;
+            uint tx = small || optimized ? 128u : 256u, tm = small ? 16u : 32u, tn = small ? 32u : 64u;
             gpu.Begin();
-            gpu.Dispatch2D(name, p, ((uint)n + tn - 1) / tn * tx, ((uint)m + tm - 1) / tm, tx, x, w, s, legacy);
-            gpu.Dispatch2D(name + suffix, p, ((uint)n + tn - 1) / tn * tx, ((uint)m + tm - 1) / tm, tx, x, w, s, y);
+            gpu.Dispatch2D(name, p, ((uint)n + tn - 1) / tn * (small ? 128u : 256u), ((uint)m + tm - 1) / tm, small ? 128u : 256u, x, w, s, legacy);
+            if (!small && predecoded) {
+                using var xhalf=gpu.Allocate((ulong)m*(ulong)k*2);using var whalf=gpu.Allocate((ulong)n*(ulong)k*2);
+                gpu.Dispatch("projection_unpack_half",p,(uint)(n*k/4),128,w,s,whalf);
+                gpu.Dispatch("projection_input_half",p,(uint)(m*k/4),128,x,xhalf);
+                gpu.Dispatch2D("matrix_product_predecoded",p,(uint)((n+63)/64)*128,(uint)((m+63)/64),128,xhalf,whalf,y);
+                gpu.End(); gpu.Begin();
+            } else gpu.Dispatch2D(name + suffix + (!small && optimized ? "_tile" : ""), p, ((uint)n + tn - 1) / tn * tx, ((uint)m + tm - 1) / tm, tx, x, w, s, y);
             gpu.End();
             for (int row = 0; row < m; row++) for (int col = 0; col < n; col++)
             {
@@ -82,11 +89,11 @@ internal static class TensorOpsSelfTest
         // Distinct expert/choice offsets, partial tiles, nontrivial token permutation,
         // grouped down input, tail output columns and an excess dispatched tile.
         {
-            const int m = 24, n = 69, k = 256, scaleCount = 2, slotBytes = n * k + scaleCount * 2;
-            using var x = gpu.Allocate(m * k * 4); using var raw = gpu.Allocate(6 * slotBytes);
+            int m = tileRows + 8; const int n = 69, k = 256, scaleCount = 2, slotBytes = n * k + scaleCount * 2;
+            using var x = gpu.Allocate((ulong)m * k * 4); using var raw = gpu.Allocate(6 * slotBytes);
             using var desc = gpu.Allocate(2 * 6 * 8); using var tiles = gpu.Allocate(3 * 4 * 4);
-            using var count = gpu.Allocate(4); using var tokens = gpu.Allocate(m * 4);
-            using var y = gpu.Allocate((m * n + 1) * 4); using var legacy = gpu.Allocate(m * n * 4);
+            using var count = gpu.Allocate(4); using var tokens = gpu.Allocate((ulong)m * 4);
+            using var y = gpu.Allocate((ulong)(m * n + 1) * 4); using var legacy = gpu.Allocate((ulong)m * n * 4);
             for (int i = 0; i < m * k; i++) x.Values<float>(m * k)[i] = Input(i);
             for (int i = 0; i < m; i++) tokens.Values<uint>(m)[i] = (uint)((i * 7 + 5) % m);
             for (int slot = 0; slot < 6; slot++)
@@ -97,14 +104,21 @@ internal static class TensorOpsSelfTest
                 raw.Values<ushort>(2, (ulong)(slot * slotBytes + n * k))[0] = (ushort)(0x3c00 + slot * 128);
                 raw.Values<ushort>(2, (ulong)(slot * slotBytes + n * k))[1] = (ushort)(0x3b80 + slot * 128);
             }
-            uint[] tileData = [0, 0, 1, 0, 1, 1, 7, 0, 0, 8, 16, 0]; tileData.CopyTo(tiles.Values<uint>(12)); count.Values<uint>(1)[0] = 3;
+            uint[] tileData = [0, 0, 1, 0, 1, 1, 7, 0, 0, 8, (uint)tileRows, 0]; tileData.CopyTo(tiles.Values<uint>(12)); count.Values<uint>(1)[0] = 3;
             for (uint choice = 0; choice < 3; choice++)
             {
                 y.Values<float>(m * n + 1).Fill(float.NaN);
                 var p = new KernelArgs { N = n, K = k, Kind = choice };
                 gpu.Begin();
-                gpu.Dispatch2D("expert_matrix", p, 512, 4, 256, x, raw, desc, tiles, count, tokens, legacy);
-                gpu.Dispatch2D("expert_matrix" + suffix, p, 512, 4, 256, x, raw, desc, tiles, count, tokens, y); gpu.End();
+                if (tileRows == 16) gpu.Dispatch2D("expert_matrix", p, 512, 4, 256, x, raw, desc, tiles, count, tokens, legacy);
+                if (expertPredecoded) {
+                    using var xhalf=gpu.Allocate((ulong)m*k*2);using var whalf=gpu.Allocate(2*n*k*2);
+                    p.M=(uint)m;p.A=2;
+                    gpu.Dispatch("expert_unpack_half",p,2*n*k/4,128,raw,desc,whalf);
+                    gpu.Dispatch("expert_input_half",p,(uint)(m*k/4),128,x,tokens,xhalf);
+                    gpu.Dispatch2D("expert_matrix_predecoded",p,256,4,128,xhalf,whalf,tiles,count,y);
+                    gpu.End();gpu.Begin();
+                } else gpu.Dispatch2D("expert_matrix" + suffix + (optimized ? "_tile" + (tileRows == 16 ? "" : tileRows.ToString()) + (choice == 2 ? "_down" : "_up") : ""), p, optimized && choice != 2 && tileRows != 64 ? 256u : 512u, 4, optimized && choice != 2 && tileRows != 64 ? 128u : 256u, x, raw, desc, tiles, count, tokens, y); gpu.End();
                 for (int row = 0; row < m; row++) for (int col = 0; col < n; col++)
                 {
                     int slot = (row is >= 1 and < 8 ? 3 : 0) + (int)choice;
@@ -120,7 +134,7 @@ internal static class TensorOpsSelfTest
                         expected += term; magnitude += Math.Abs(term);
                     }
                     Check(y.Values<float>(m * n)[row * n + col], expected, magnitude, "expert CPU");
-                    Check(legacy.Values<float>(m * n)[row * n + col], originalExpected, originalMagnitude, "expert legacy CPU");
+                    if (tileRows == 16) Check(legacy.Values<float>(m * n)[row * n + col], originalExpected, originalMagnitude, "expert legacy CPU");
                 }
                 if (!float.IsNaN(y.Values<float>(m * n + 1)[m * n])) throw new Exception("Expert output guard overwritten");
             }
@@ -132,11 +146,22 @@ internal static class TensorOpsSelfTest
             using var x = gpu.Allocate(k * 4); using var w = gpu.Allocate(k * 4); using var y = gpu.Allocate(4);
             x.Values<float>(k).Fill(1);
             for (int j = 0; j < k; j++) w.Values<float>(k)[j] = j % 2 == 0 ? 1 : 1f / 1024;
-            gpu.Begin(); gpu.Dispatch2D((small ? "matrix_product_small" : "matrix_product") + suffix, new() { M = 1, N = 1, K = k, Kind = 2 }, small ? 128u : 256u, 1, small ? 128u : 256u, x, w, w, y); gpu.End();
+            if (!small && predecoded)
+            {
+                using var xhalf=gpu.Allocate(k*2);using var whalf=gpu.Allocate(k*2);
+                var p=new KernelArgs { M=1,N=1,K=k,Kind=2 };
+                gpu.Begin();gpu.Dispatch("projection_unpack_half",p,k/4,128,w,w,whalf);
+                gpu.Dispatch("projection_input_half",p,k/4,128,x,xhalf);
+                gpu.Dispatch2D("matrix_product_predecoded",p,128,1,128,xhalf,whalf,y);gpu.End();
+            }
+            else
+            {
+            gpu.Begin(); gpu.Dispatch2D((small ? "matrix_product_small" : "matrix_product") + suffix + (!small && optimized ? "_tile" : ""), new() { M = 1, N = 1, K = k, Kind = 2 }, small || optimized ? 128u : 256u, 1, small || optimized ? 128u : 256u, x, w, w, y); gpu.End();
+            }
             if (y.Values<float>(1)[0] != 2050) throw new Exception("FP32 accumulation fixture failed");
             checks++;
         }
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "tensorops_self_test", precision, checks,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "tensorops_self_test", precision, optimized, tileRows, predecoded, expertPredecoded, checks,
             max_abs_error_vs_rounded_reference = worst, fp32_accumulation = "passed", strict_fp32_cancellation = precision == "fp32" ? "passed" : "not applicable" }));
     }
 }
