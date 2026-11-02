@@ -2,6 +2,7 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
 using namespace metal;
+// Expert pipeline experiments keep the checkpoint's FP8 bytes and BF16 scales.
 struct P { uint n,m,k,kind,pos,flags,a,b; float eps,theta,scale,value; uint c,d,e,f; };
 struct Expert { ulong gate,gate_scale,up,up_scale,down,down_scale; };
 inline float bf(ushort x) { return as_type<float>(uint(x)<<16); }
@@ -1200,3 +1201,96 @@ kernel void attention_online_q##BQ##_k##BK##_s##SG##_g##G##_r1(device half*q [[b
 ONLINE_REUSE(32,256,8,1)
 ONLINE_REUSE(32,256,8,8)
 #undef ONLINE_REUSE
+
+
+// One SIMD group owns 32 output columns. Prefetch packed FP8 bytes into
+// registers while alternating two FP16 weight stages; accumulate in FP32.
+template<int Rows, bool Prefetch, class Acc>
+inline void expert_staged_accumulate(device half*x,device const uchar*w,device const ushort*s,
+    uint k,uint n,uint firstColumn,uint live,uint lane,threadgroup half*stage,thread Acc &acc) {
+    constexpr auto desc=matmul2d_descriptor(Rows,32,32,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<1>> op;
+    auto full=tensor(x,dextents<int,2>{int(k),int(live)},array<int,2>{1,int(k)});
+    auto left=full.slice<32,Rows>(0,0);
+    auto b0=tensor(stage,extents<int,32,32>{},array<int,2>{1,32});
+    auto b1=tensor(stage+1024,extents<int,32,32>{},array<int,2>{1,32});
+
+    const uint row=firstColumn+lane;
+    uchar4 bytes[8];float scale=0;
+    if(Prefetch&&row<n){for(uint j=0;j<8;j++)bytes[j]=*((device const uchar4*)(w+row*k+j*4));scale=bf(s[(row/128)*(k/128)]);}
+    for(uint block=0;block<k;block+=32){
+        uint buffer=Prefetch?((block/32)&1):0;
+        if(!Prefetch&&row<n){for(uint j=0;j<8;j++)bytes[j]=*((device const uchar4*)(w+row*k+block+j*4));scale=bf(s[(row/128)*(k/128)+block/128]);}
+        for(uint j=0;j<8;j++)*((threadgroup half4*)(stage+buffer*1024+lane*32+j*4))=row<n?half4(f8x4(bytes[j])*scale):half4(0);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        if(Prefetch&&block+32<k&&row<n){
+            for(uint j=0;j<8;j++)bytes[j]=*((device const uchar4*)(w+row*k+block+32+j*4));
+            if((block+32)%128==0)scale=bf(s[(row/128)*(k/128)+(block+32)/128]);
+        }
+        auto a=full.slice<32,Rows>(int(block),0);
+        if(buffer)op.run(a,b1,acc);else op.run(a,b0,acc);
+        if(!Prefetch)simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+template<int Rows, bool Prefetch, bool Fused>
+inline void expert_staged_run(device half*x,device const uchar*raw,device const Expert*experts,
+    device const ExpertTile*tiles,device float*y,constant P&p,uint3 group,uint lane,uint sid,threadgroup half*stage){
+    ExpertTile tile=tiles[group.y];Expert d=experts[tile.expert];
+    uint choice=Fused?sid:p.kind;
+    ulong wo=choice==0?d.gate:choice==1?d.up:d.down,so=choice==0?d.gate_scale:choice==1?d.up_scale:d.down_scale;
+    uint column=Fused?group.x*32:group.x*64+sid*32;
+    constexpr auto desc=matmul2d_descriptor(Rows,32,32,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<1>> op;
+    auto full=tensor(x+tile.first*p.k,dextents<int,2>{int(p.k),int(tile.count)},array<int,2>{1,int(p.k)});
+    auto a=full.slice<32,Rows>(0,0);
+    auto b=tensor(stage,extents<int,32,32>{},array<int,2>{1,32});
+    auto acc=op.template get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    expert_staged_accumulate<Rows,Prefetch>(x+tile.first*p.k,raw+wo,(device const ushort*)(raw+so),p.k,p.n,column,tile.count,lane,stage+sid*2048,acc);
+    if constexpr(Fused){
+        threadgroup float*gate=(threadgroup float*)stage;
+        if(sid==0)for(uint i=0;i<acc.get_capacity();++i){if(!acc.is_valid_element(i))continue;auto c=acc.get_multidimensional_index(i);gate[c[1]*32+c[0]]=acc[i];}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if(sid==1)for(uint i=0;i<acc.get_capacity();++i){if(!acc.is_valid_element(i))continue;auto c=acc.get_multidimensional_index(i);if(c[1]<tile.count&&column+c[0]<p.n)((device half*)y)[(tile.first+c[1])*p.n+column+c[0]]=half(silu(gate[c[1]*32+c[0]])*acc[i]);}
+    }else{
+        for(uint i=0;i<acc.get_capacity();++i){if(!acc.is_valid_element(i))continue;auto c=acc.get_multidimensional_index(i);if(c[1]<tile.count&&column+c[0]<p.n)y[(tile.first+c[1])*p.n+column+c[0]]=acc[i];}
+    }
+}
+template<bool Prefetch,bool Fused>
+kernel void expert_staged(device half*x [[buffer(0)]],device const uchar*raw [[buffer(1)]],device const Expert*experts [[buffer(2)]],device const ExpertTile*tiles [[buffer(3)]],device const uint*tileCount [[buffer(4)]],device float*y [[buffer(5)]],constant P&p [[buffer(15)]],uint3 group [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]],uint sid [[simdgroup_index_in_threadgroup]]){
+    if(group.y>=tileCount[0])return;
+    threadgroup half stage[4096];
+    uint rows=tiles[group.y].count;
+    if(rows<=8)expert_staged_run<8,Prefetch,Fused>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
+    else if(rows<=16)expert_staged_run<16,Prefetch,Fused>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
+    else expert_staged_run<32,Prefetch,Fused>(x,raw,experts,tiles,y,p,group,lane,sid,stage);
+}
+template [[host_name("expert_matrix_staged")]] kernel decltype(expert_staged<false,false>) expert_staged<false,false>;
+template [[host_name("expert_matrix_pipeline")]] kernel decltype(expert_staged<true,false>) expert_staged<true,false>;
+template [[host_name("expert_gate_up_pipeline")]] kernel decltype(expert_staged<true,true>) expert_staged<true,true>;
+
+// All threads cooperatively scan routes twice, instead of once per expert.
+// Ordering inside an expert is unspecified; inverse restores token/top-k order.
+kernel void expert_group_parallel(device const int*ids [[buffer(0)]],device uint*countsOut [[buffer(1)]],device uint*offsets [[buffer(2)]],device ExpertTile*tiles [[buffer(3)]],device uint*tileCount [[buffer(4)]],device uint*tokens [[buffer(5)]],device uint*inverse [[buffer(6)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup atomic_uint counts[256],cursors[256];
+    threadgroup uint rowsBase[256],tileBase[256],rowSums[8],tileSums[8];
+    atomic_store_explicit(counts+tid,0,memory_order_relaxed);
+    atomic_store_explicit(cursors+tid,0,memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint r=tid;r<p.m*8;r+=256)atomic_fetch_add_explicit(counts+ids[r],1,memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint count=atomic_load_explicit(counts+tid,memory_order_relaxed),numTiles=(count+p.a-1)/p.a;
+    uint rowPrefix=simd_prefix_exclusive_sum(count),tilePrefix=simd_prefix_exclusive_sum(numTiles);
+    if((tid&31)==31){rowSums[tid/32]=rowPrefix+count;tileSums[tid/32]=tilePrefix+numTiles;}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint sg=0;sg<tid/32;sg++){rowPrefix+=rowSums[sg];tilePrefix+=tileSums[sg];}
+    rowsBase[tid]=rowPrefix;tileBase[tid]=tilePrefix;
+    countsOut[tid]=count;offsets[tid]=rowPrefix;
+    for(uint t=0;t<numTiles;t++)tiles[tilePrefix+t]={tid,rowPrefix+t*p.a,min(p.a,count-t*p.a),0};
+    if(tid==255){offsets[256]=rowPrefix+count;tileCount[0]=tilePrefix+numTiles;}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint r=tid;r<p.m*8;r+=256){uint e=ids[r],out=rowsBase[e]+atomic_fetch_add_explicit(cursors+e,1,memory_order_relaxed);tokens[out]=r/8;inverse[r]=out;}
+}
+template [[host_name("expert_gate_up_staged")]] kernel decltype(expert_staged<false,true>) expert_staged<false,true>;
