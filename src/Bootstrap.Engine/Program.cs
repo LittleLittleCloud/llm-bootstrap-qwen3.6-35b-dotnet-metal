@@ -51,7 +51,24 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.ExpertTileRows = int.Parse(Option("--expert-tile-rows") ?? (tunedPrefill ? "64" : "16"));
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
         engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
-        if (command == "moe-self-tests") { engine.VerificationSelfTest(); engine.PrefixCachingEnabled = true; engine.ClearPrefixCache(); PrefixCacheSelfTest.Run(engine); return; }
+        if (command == "moe-self-tests") {
+            if (engine.ValidateDelta) {
+                string prompt = File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required for model DeltaNet validation"));
+                string expected = Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required");
+                var result = engine.Generate(engine.Tokenizer.SimpleChat(prompt), 32, false);
+                if (result.Text.Trim() != expected) throw new Exception("Delta model validation failed the full answer");
+                Console.WriteLine(JsonSerializer.Serialize(new { type = "delta_model_answer", text = result.Text, passed = true }));
+                engine.ValidateDelta = false;
+            }
+            engine.VerificationSelfTest(); engine.PrefixCachingEnabled = true; engine.ClearPrefixCache(); PrefixCacheSelfTest.Run(engine);
+            if (args.Contains("--profile-after-checks")) {
+                foreach (string name in new[] { "--prompt-file", "--long-prompt-file" }) {
+                    var file = Option(name) ?? throw new ArgumentException(name + " is required");
+                    engine.ProfilePrefill(File.ReadAllText(file), int.Parse(Option("--runs") ?? "3"), true);
+                }
+            }
+            return;
+        }
         if (command == "kv-cache-self-test") { engine.KvCacheSelfTest(); return; }
         if (command == "speculation-self-test") { engine.SpeculationSelfTest(); return; }
         if (command == "compare-decode-variants") { engine.CompareDecodeVariants(int.Parse(Option("--runs") ?? "3")); return; }
