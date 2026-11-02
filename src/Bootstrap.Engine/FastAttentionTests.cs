@@ -9,6 +9,7 @@ internal static class FastAttentionTests
     {
         if (repeats < 1) throw new ArgumentOutOfRangeException(nameof(repeats));
         using var gpu = new Metal(source);
+        CheckCausalSoftmax(gpu);
         using var deviceAttention = new DeviceAttentionWorkspace(gpu);
         foreach (var (history, rows) in new[] { (0, 1), (17, 7), (0, 512), (1024, 512), (10520, 190), (32768, 63), (10520, 512), (10520, 2048), (30000, 2048) })
         {
@@ -29,11 +30,11 @@ internal static class FastAttentionTests
             var p = new KernelArgs { M = (uint)rows, Position = (uint)history, K = (uint)length, Flags = halfKv ? 256u : 0u };
             var softmax = p; softmax.Position = (uint)(length - 1);
             deviceAttention.Prepare(rows, length, halfKv);
-            foreach (string mode in (halfKv ? new[] { "legacy", "tiled", "fp16", "fp16_opt64", "fp16-device", "fused-fp16", "fused-fp16-128" } : tiles ? new[] { "fp16", "fp16_opt64", "fp16-device" } : new[] { "tiled", "fp16", "fused-fp16", "fused-fp16-128" }))
+            foreach (string mode in (halfKv ? new[] { "legacy", "tiled", "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal", "fused-fp16", "fused-fp16-128" } : tiles ? new[] { "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal" } : new[] { "tiled", "fp16", "fused-fp16", "fused-fp16-128" }))
             {
                 void Encode(GpuBuffer input, GpuBuffer destination)
                 {
-                    if (mode == "fp16-device") deviceAttention.Encode(input, cacheK, cacheV, gate, scores, destination, rows, history, halfKv);
+                    if (mode.StartsWith("fp16-device")) deviceAttention.Encode(input, cacheK, cacheV, gate, scores, destination, rows, history, halfKv, mode == "fp16-device-causal");
                     else if (mode.StartsWith("fused")) gpu.Dispatch2D(mode.EndsWith("128") ? "batch_attention_fused_fp16_bk128" : "batch_attention_fused_fp16", p, (uint)((rows + 15) / 16) * 128, 16, 128, input, cacheK, cacheV, gate, destination);
                     else
                     {
@@ -72,6 +73,38 @@ internal static class FastAttentionTests
                 }
             }
         }
+    }
+    static void CheckCausalSoftmax(Metal gpu)
+    {
+        int checks = 0;
+        foreach (var (history, rows) in new[] { (0, 1), (17, 7), (0, 19), (127, 63) })
+        {
+            int length = history + rows + 37, elements = rows * 16 * length;
+            using var scores = gpu.Allocate((ulong)elements * 4);
+            using var probabilities = gpu.Allocate((ulong)(elements + 1) * 2);
+            scores.Values<float>(elements).Fill(float.NaN);
+            probabilities.Values<Half>(elements + 1).Fill(Half.NaN);
+            for (int row = 0; row < rows; row++) for (int head = 0; head < 16; head++)
+                for (int t = 0; t <= history + row; t++) scores.Values<float>(elements)[(row * 16 + head) * length + t] = ((t * 31 + head * 13 + row * 7) % 67 - 33) / 8f;
+            var p = new KernelArgs { M = (uint)rows, K = (uint)length, Position = (uint)history };
+            gpu.Begin(); gpu.Dispatch("attention_softmax_half_causal", p, (uint)rows * 16 * 256, 256, scores, probabilities); gpu.End();
+            for (int row = 0; row < rows; row++) for (int head = 0; head < 16; head++)
+            {
+                int valid = history + row + 1, end = history + Math.Min(rows, (row / 16 + 1) * 16);
+                double Score(int t) => ((t * 31 + head * 13 + row * 7) % 67 - 33) / 8.0;
+                double max = Enumerable.Range(0, valid).Max(Score), sum = Enumerable.Range(0, valid).Sum(t => Math.Exp(Score(t) - max));
+                for (int t = 0; t < length; t++)
+                {
+                    float actual = (float)probabilities.Values<Half>(elements)[(row * 16 + head) * length + t];
+                    double expected = t < valid ? (float)(Half)(Math.Exp(Score(t) - max) / sum) : 0;
+                    bool correct = t >= end ? float.IsNaN(actual) : t >= valid ? actual == 0 : float.IsFinite(actual) && Math.Abs(actual - expected) <= Math.Max(1e-7, expected * .0011);
+                    if (!correct) throw new Exception($"Causal softmax bounds/reference mismatch: {history}/{row}/{head}/{t}: {actual} vs {expected}");
+                    checks++;
+                }
+            }
+            if (!Half.IsNaN(probabilities.Values<Half>(elements + 1)[elements])) throw new Exception("Causal probability guard overwritten");
+        }
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "causal_softmax_self_test", checks, masked_inputs = "NaN", unused_outputs = "NaN guards preserved" }));
     }
     static void Fill(GpuBuffer buffer, int count, uint seed, float scale)
     {

@@ -548,3 +548,78 @@ Local raw results, resource samples and source hashes are in `artifacts/fp16-kv/
 Comparison commands report the selected KV precision and use it for all their
 candidates; they do not switch cache storage between variants. Use an explicit
 `--kv-cache-precision fp32` when reproducing historical FP32-KV measurements.
+
+## Gathered experts and causal device attention
+
+The next `--tuned-prefill` revision packs routed expert inputs once into a
+contiguous FP16 buffer, reused by gate and up projections. Expert weights stay
+FP8 in memory and are unpacked by 64x64 blocks inside TensorOps kernels; the
+whole expert checkpoint is not predecoded. Adaptive 16/32/64-row products avoid
+computing a full 64-row tile for small expert tails. Device attention skips
+fully masked QK tiles, limits AV to the valid keys for each query tile, and
+writes FP16 probabilities directly from FP32 softmax. FP32 accumulation and
+FP16 KV storage are unchanged. Small speculative-verification batches retain
+their existing path.
+
+On the same M5 Pro, three interleaved warm uncached runs of the 10,520-token
+public prompt produced these medians. Model loading and tokenization are
+excluded; all warm variants retain the largest allocated workspace.
+
+| Configuration | Prefill wall time | Prefill tok/s |
+| --- | ---: | ---: |
+| Previous FP16-KV tuned path (`4187694`) | 8.480 s | 1240.62 |
+| Gathered inputs + causal attention | 7.336 s | 1433.99 |
+| Plus adaptive expert tails (selected) | 6.990 s | 1505.00 |
+
+The selected path improves throughput **21.3%** (1.213x), not the requested
+2.5x. Its three samples were 1494.24–1506.73 tok/s. GPU execution remains the
+bottleneck: median command-buffer GPU time was 6.969 s of 6.990 s wall time;
+process CPU consumption was 23.4 ms. All three variants returned the complete
+needle answer and the arithmetic-smoke answer; the smoke logits matched
+exactly. These are local development measurements, not a new formal evaluation
+or an updated leaderboard result. No decode throughput improvement is claimed.
+
+Independent CPU-reference tests pass 132,977 matrix checks, including all
+adaptive tile sizes, partial columns, expert routing and FP32 accumulation.
+Another 253,280 softmax checks use NaN-filled masked inputs and untouched output
+guards. Eight attention paths pass nine shapes with output aliasing and FP16
+KV (maximum absolute CPU-reference error 7.68e-7), and the 1,659 existing kernel
+checks pass. Four TensorOps attention paths also pass the nine shapes with
+FP32 KV (maximum absolute CPU-reference error 6.21e-7). `profile-experts` benchmarks uniform and skewed expert routing
+using the production kernels, including input packing in the timing.
+
+The selected preset also passes 45 verifier checks and 48 prefix-cache checks.
+Two 30,044-token retrieval prompts at depths 5% and 90% return the correct code,
+pass two exact cached repeats each, and allow a short cached request after 32K
+KV growth. Metal buffers total 40,136,179,712 bytes, 64 MiB above the previous
+FP16-KV regression; no OOM occurred. First-token times are 26.12 and 25.88 s
+(1150 and 1161 effective input tok/s). These different workloads are not paired
+with the 10K comparison above. Buffer allocation is not system-wide residency;
+system swap was active during this regression.
+
+Reproduce the paired local benchmark with:
+
+```sh
+dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll \
+  compare-prefill-variants --model-dir "$TARGET" --draft-dir "$DRAFT" \
+  --prompt-file "$PROMPT" --expected-answer 73DY-DRV5-B8FJ \
+  --context-window 32768 --kv-cache-precision fp16 --runs 3 --throughput-variants
+```
+
+The public prompt SHA256 is
+`d3367dad7b2bb2004af3ab0e54fe2d2d76944cf58c7ba36d18673b62a950b6ee`.
+Raw paired runs are in `artifacts/expert-throughput/model-adaptive.jsonl`;
+final matrix, attention, expert microbenchmarks and cache regressions use the
+`final-*` prefix in the same local directory. Rejected kernel attempts and
+compiler errors remain there separately. The new input workspace uses 64 MiB
+at a 2048-token batch and is reused across layers. Explicit
+`--predecoded-experts` selects the older experimental path instead of gathered
+experts; `--gathered-experts`, `--causal-attention` and
+`--adaptive-expert-tiles` also enable the individual changes outside the preset.
+
+The preceding FP16-KV revision `4187694` already has a completed formal
+[evaluation in LLM Bootstrap PR #36](https://github.com/LittleLittleCloud/LLM-Bootstrap/pull/36),
+merged with the unchanged predecessor OOM report. That revision scored 1245.3
+prefill tok/s, conformance 10/10, needle 10/10 and cache correctness 18/18, with
+no OOM. Its report predates the optimizations in this section; it does not
+validate their full evaluation performance.

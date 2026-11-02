@@ -11,8 +11,9 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
+if (command == "profile-experts") { ExpertThroughputTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "3")); return; }
 if (command == "kv-storage-self-test") { KvStorageTests.Run(File.ReadAllText(kernelFile)); return; }
-if (command == "tensorops-self-test") { TensorOpsSelfTest.Run(File.ReadAllText(kernelFile), Option("--precision") ?? "fp32", args.Contains("--optimized-projections"), int.Parse(Option("--expert-tile-rows") ?? "16"), args.Contains("--predecoded-projections"), args.Contains("--predecoded-experts")); return; }
+if (command == "tensorops-self-test") { TensorOpsSelfTest.Run(File.ReadAllText(kernelFile), Option("--precision") ?? "fp32", args.Contains("--optimized-projections"), int.Parse(Option("--expert-tile-rows") ?? "16"), args.Contains("--predecoded-projections"), args.Contains("--predecoded-experts"), args.Contains("--gathered-experts"), args.Contains("--adaptive-expert-tiles")); return; }
 if (command == "profile-fast-attention") { FastAttentionTests.Run(File.ReadAllText(Option("--kernel-file") ?? kernelFile), int.Parse(Option("--runs") ?? "3"), args.Contains("--attention-tiles"), Option("--kv-cache-precision") == "fp16"); return; }
 if (command == "profile-attention") { AttentionWallProfile.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--tiled-attention")); return; }
 if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
@@ -32,6 +33,9 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.WidePrefill = fastPrefill || args.Contains("--wide-prefill");
         engine.OptimizedProjections = tunedPrefill || args.Contains("--optimized-projections");
         engine.PredecodedProjections = tunedPrefill || args.Contains("--predecoded-projections");
+        engine.AdaptiveExpertTiles = tunedPrefill || args.Contains("--adaptive-expert-tiles");
+        engine.CausalDeviceAttention = tunedPrefill || args.Contains("--causal-attention");
+        engine.GatheredExperts = args.Contains("--gathered-experts") || (tunedPrefill && !args.Contains("--predecoded-experts"));
         engine.PredecodedExperts = args.Contains("--predecoded-experts");
         engine.PrefillBatchSize = int.Parse(Option("--prefill-batch-size") ?? (tunedPrefill ? "2048" : "512"));
         engine.ExpertTileRows = int.Parse(Option("--expert-tile-rows") ?? (tunedPrefill ? "64" : "16"));
@@ -40,7 +44,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         if (command == "kv-cache-self-test") { engine.KvCacheSelfTest(); return; }
         if (command == "speculation-self-test") { engine.SpeculationSelfTest(); return; }
         if (command == "compare-decode-variants") { engine.CompareDecodeVariants(int.Parse(Option("--runs") ?? "3")); return; }
-        if (command == "compare-prefill-variants") { engine.ComparePrefillVariants(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required"), args.Contains("--fast-variants"), args.Contains("--projection-variants"), args.Contains("--batch-variants"), args.Contains("--tuned-variants"), args.Contains("--expert-variants"), args.Contains("--final-variants")); return; }
+        if (command == "compare-prefill-variants") { engine.ComparePrefillVariants(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required"), args.Contains("--fast-variants"), args.Contains("--projection-variants"), args.Contains("--batch-variants"), args.Contains("--tuned-variants"), args.Contains("--expert-variants"), args.Contains("--final-variants"), args.Contains("--throughput-variants")); return; }
         if (command == "compare-tensorops") { engine.CompareTensorOps(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3")); return; }
         if (command == "profile-prefill") { engine.ProfilePrefill(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), args.Contains("--all-kernels")); return; }
         if (command == "profile-decode") { engine.ProfileDecode(); return; }

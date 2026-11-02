@@ -1052,3 +1052,80 @@ kernel void attention_values_device(device half*scores [[buffer(0)]],device half
     #pragma unroll
     for(uint i=0;i<acc.get_capacity();++i){auto c=acc.get_multidimensional_index(i);uint r=firstRow+c[1],d=firstDim+c[0];if(c[1]<16&&c[0]<64&&r<p.m){uint at=(r*16+head)*256+d;y[at]=acc[i]*sigmoid(gate[at]);}}
 }
+
+// Gathered FP16 input is shared by gate/up and read directly by TensorOps.
+// Weights remain packed FP8 and only one 64x64 block is unpacked per group.
+template<int Rows>
+inline void expert_gathered_product(device half*x,device const uchar*raw,device const Expert*experts,device const ExpertTile*tiles,device const uint*tileCount,device float*y,constant P&p,uint tid,uint3 group,threadgroup half*wt) {
+    if(group.y>=tileCount[0])return;ExpertTile tile=tiles[group.y];Expert descriptor=experts[tile.expert];uint firstColumn=group.x*64;
+    ulong woff=p.kind==0?descriptor.gate:p.kind==1?descriptor.up:descriptor.down,soff=p.kind==0?descriptor.gate_scale:p.kind==1?descriptor.up_scale:descriptor.down_scale;
+    device const uchar*w=raw+woff;device const ushort*s=(device const ushort*)(raw+soff);
+    constexpr auto desc=matmul2d_descriptor(Rows,64,64,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<4>> op;
+    auto full=tensor(x+tile.first*p.k,dextents<int,2>{int(p.k),int(tile.count)},array<int,2>{1,int(p.k)});
+    auto left=full.slice<64,dynamic_extent>(0,0);
+    auto right=tensor(wt,extents<int,64,64>{},array<int,2>{1,65});
+    auto acc=op.template get_destination_cooperative_tensor<decltype(left),decltype(right),float>();
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    for(uint block=0;block<p.k;block+=64){
+        for(uint i=tid;i<64*16;i+=128){uint row=i/16,col=(i%16)*4;float4 value=firstColumn+row<p.n?weight4(w,s,firstColumn+row,block+col,p.k,0):float4(0);for(uint d=0;d<4;++d)wt[row*65+col+d]=value[d];}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        auto left=full.slice<64,dynamic_extent>(int(block),0);op.run(left,right,acc);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for(uint i=0;i<acc.get_capacity();++i){auto c=acc.get_multidimensional_index(i);if(c[1]<tile.count&&c[0]<64&&firstColumn+c[0]<p.n)y[(tile.first+c[1])*p.n+firstColumn+c[0]]=acc[i];}
+}
+kernel void expert_matrix_gathered(device half*x [[buffer(0)]],device const uchar*raw [[buffer(1)]],device const Expert*experts [[buffer(2)]],device const ExpertTile*tiles [[buffer(3)]],device const uint*tileCount [[buffer(4)]],device float*y [[buffer(5)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
+    threadgroup half wt[64*65];
+    if(group.y>=tileCount[0])return;uint rows=tiles[group.y].count;
+    if((p.flags&1)&&rows<=16)expert_gathered_product<16>(x,raw,experts,tiles,tileCount,y,p,tid,group,wt);
+    else if((p.flags&1)&&rows<=32)expert_gathered_product<32>(x,raw,experts,tiles,tileCount,y,p,tid,group,wt);
+    else expert_gathered_product<64>(x,raw,experts,tiles,tileCount,y,p,tid,group,wt);
+}
+
+kernel void attention_scores_device_causal(device half*q [[buffer(0)]],device half*k [[buffer(1)]],device float*scores [[buffer(2)]],constant P&p [[buffer(15)]],uint3 group [[threadgroup_position_in_grid]]) {
+    uint head=group.y%16,firstRow=(group.y/16)*16,firstKey=group.x*64;
+    if(firstKey>=p.pos+min(p.m,firstRow+16))return;
+    constexpr auto desc=matmul2d_descriptor(16,64,256,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<4>> op;
+    auto qfull=tensor(q+head*256,dextents<int,2>{256,int(p.m)},array<int,2>{1,4096});
+    auto kfull=tensor(k+(head/8)*256,dextents<int,2>{256,int(p.k)},array<int,2>{1,512});
+    auto left=qfull.slice(0,int(firstRow));auto right=kfull.slice(0,int(firstKey));
+    auto acc=op.get_destination_cooperative_tensor<decltype(left),decltype(right),float>();
+    #pragma unroll
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    op.run(left,right,acc);
+    #pragma unroll
+    for(uint i=0;i<acc.get_capacity();++i){auto c=acc.get_multidimensional_index(i);uint r=firstRow+c[1],t=firstKey+c[0];if(c[1]<16&&c[0]<64&&r<p.m&&t<p.k)scores[(r*16+head)*p.k+t]=t<=p.pos+r?acc[i]*(1.0f/16.0f):-INFINITY;}
+}
+
+kernel void attention_values_device_causal(device half*scores [[buffer(0)]],device half*v [[buffer(1)]],device const float*gate [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint3 group [[threadgroup_position_in_grid]]) {
+    uint head=group.y%16,firstRow=(group.y/16)*16,firstDim=group.x*64;
+    uint used=min(p.k,p.pos+min(p.m,firstRow+16));
+    constexpr auto desc=matmul2d_descriptor(16,64,dynamic_extent,false,false,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<4>> op;
+    auto pfull=tensor(scores+head*p.k,dextents<int,2>{int(used),int(p.m)},array<int,2>{1,int(16*p.k)});
+    auto vfull=tensor(v+(head/8)*256,dextents<int,2>{256,int(used)},array<int,2>{1,512});
+    auto left=pfull.slice(0,int(firstRow));auto right=vfull.slice(int(firstDim),0);
+    auto acc=op.get_destination_cooperative_tensor<decltype(left),decltype(right),float>();
+    #pragma unroll
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    op.run(left,right,acc);
+    #pragma unroll
+    for(uint i=0;i<acc.get_capacity();++i){auto c=acc.get_multidimensional_index(i);uint r=firstRow+c[1],d=firstDim+c[0];if(c[1]<16&&c[0]<64&&r<p.m){uint at=(r*16+head)*256+d;y[at]=acc[i]*sigmoid(gate[at]);}}
+}
+
+
+// Causal row limits also bound the AV input. Write half probabilities directly,
+// with zero padding only through the final row of the current 16-query tile.
+kernel void attention_softmax_half_causal(device float*x [[buffer(0)]],device half*y [[buffer(1)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint head [[threadgroup_position_in_grid]]) {
+    uint row=head/16,valid=min(p.k,p.pos+row+1),end=min(p.k,p.pos+min(p.m,(row/16+1)*16));
+    threadgroup float partial[8];threadgroup float maximum,denominator;float top=-INFINITY;
+    for(uint i=tid;i<valid;i+=256)top=max(top,x[head*p.k+i]);
+    top=simd_max(top);if((tid&31)==0)partial[tid/32]=top;threadgroup_barrier(mem_flags::mem_threadgroup);
+    top=simd_max(tid<8?partial[tid]:-INFINITY);if(tid==0)maximum=top;threadgroup_barrier(mem_flags::mem_threadgroup);
+    float sum=0;for(uint i=tid;i<valid;i+=256){float value=exp(x[head*p.k+i]-maximum);x[head*p.k+i]=value;sum+=value;}
+    sum=simd_sum(sum);if((tid&31)==0)partial[tid/32]=sum;threadgroup_barrier(mem_flags::mem_threadgroup);
+    sum=simd_sum(tid<8?partial[tid]:0);if(tid==0)denominator=sum;threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint i=tid;i<end;i+=256)y[head*p.k+i]=i<valid?half(x[head*p.k+i]/denominator):half(0);
+}

@@ -8,15 +8,19 @@ namespace Bootstrap.Engine;
 internal sealed partial class QwenEngine
 {
     sealed record PrefillVariant(string Name, string Precision, string Attention, bool Wide,
-        bool Optimized = false, int Batch = 512, int Tile = 16, bool Predecoded = false, bool ExpertPredecoded = false);
+        bool Optimized = false, int Batch = 512, int Tile = 16, bool Predecoded = false, bool ExpertPredecoded = false, bool Gathered = false, bool Causal = false, bool Adaptive = false);
 
     // Alternate configuration order; warm timings exclude model load and tokenization.
     public void ComparePrefillVariants(string prompt, int runs, string expectedAnswer, bool fast = false,
-        bool projections = false, bool batches = false, bool tuned = false, bool experts = false, bool final = false)
+        bool projections = false, bool batches = false, bool tuned = false, bool experts = false, bool final = false, bool throughput = false)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
-        if (new[] { fast, projections, batches, tuned, experts, final }.Count(x => x) > 1) throw new ArgumentException("Select one comparison family");
-        PrefillVariant[] variants = final ? [
+        if (new[] { fast, projections, batches, tuned, experts, final, throughput }.Count(x => x) > 1) throw new ArgumentException("Select one comparison family");
+        PrefillVariant[] variants = throughput ? [
+            new("baseline_fp16_kv", "fp16", "fp16-device", true, true, 2048, 64, true),
+            new("gathered_causal", "fp16", "fp16-device", true, true, 2048, 64, true, false, true, true),
+            new("gathered_causal_adaptive", "fp16", "fp16-device", true, true, 2048, 64, true, false, true, true, true)
+        ] : final ? [
             new("previous_fast_prefill", "fp16", "fp16", true),
             new("tuned_prefill", "fp16", "fp16-device", true, true, 2048, 64, true)
         ] : experts ? [
@@ -51,6 +55,9 @@ internal sealed partial class QwenEngine
         string Name(PrefillVariant variant) => variant.Name;
         void Configure(PrefillVariant variant)
         {
+            AdaptiveExpertTiles = variant.Adaptive;
+            CausalDeviceAttention = variant.Causal;
+            GatheredExperts = variant.Gathered;
             TensorOpsPrecision = variant.Precision; AttentionMode = variant.Attention; WidePrefill = variant.Wide;
             OptimizedProjections = variant.Optimized; PredecodedProjections = variant.Predecoded; PredecodedExperts = variant.ExpertPredecoded; PrefillBatchSize = variant.Batch; ExpertTileRows = variant.Tile;
             ClearPrefixCache();
@@ -67,6 +74,7 @@ internal sealed partial class QwenEngine
         {
             Configure(variant);
             var result = Generate(smoke, 1, false);
+            if (throughput && result.Text.Trim() != "4") throw new Exception($"{variant.Name} failed arithmetic smoke");
             var current = logits.Values<float>(Vocabulary).ToArray(); reference ??= current;
             double squaredError = 0, squaredReference = 0, maxError = 0;
             for (int i = 0; i < Vocabulary; i++)
@@ -94,13 +102,14 @@ internal sealed partial class QwenEngine
                 var cpu = process.TotalProcessorTime; var timer = Stopwatch.StartNew();
                 var result = Generate(tokens, run == 0 ? 32 : 1, run != 0);
                 double wall = timer.Elapsed.TotalMilliseconds, cpuMs = (process.TotalProcessorTime - cpu).TotalMilliseconds;
+                if (throughput && run == 0 && result.Text.Trim() != expectedAnswer) throw new Exception($"{variant.Name} failed full needle answer");
                 int first = result.Tokens[0]; string name = Name(variant);
                 if (run == 0) firstTokens.Add(name, first);
                 if (first != firstTokens[name]) throw new Exception($"{name} changed first token across repeated runs");
                 int nonfinite = 0; foreach (float value in logits.Values<float>(Vocabulary)) if (!float.IsFinite(value)) nonfinite++;
                 if (nonfinite != 0) throw new Exception($"{name} produced nonfinite long-prompt logits");
                 Console.WriteLine(JsonSerializer.Serialize(new { type = "prefill_variant", run, variant = name,
-                    mode = run == 0 ? "cold_full_answer" : "warm_uncached", projection_precision = variant.Precision, tiled_attention = variant.Attention != "legacy", attention_mode = variant.Attention, wide_prefill = WidePrefill, optimized_projections = OptimizedProjections, predecoded_projections = PredecodedProjections, predecoded_experts = PredecodedExperts, prefill_batch_size = PrefillBatchSize, expert_tile_rows = ExpertTileRows,
+                    mode = run == 0 ? "cold_full_answer" : "warm_uncached", projection_precision = variant.Precision, tiled_attention = variant.Attention != "legacy", attention_mode = variant.Attention, wide_prefill = WidePrefill, optimized_projections = OptimizedProjections, predecoded_projections = PredecodedProjections, predecoded_experts = PredecodedExperts, gathered_experts = GatheredExperts, causal_device_attention = CausalDeviceAttention, adaptive_expert_tiles = AdaptiveExpertTiles, prefill_batch_size = PrefillBatchSize, expert_tile_rows = ExpertTileRows,
                     wall_ms = wall, process_cpu_ms = cpuMs, prompt_tokens = tokens.Length,
                     prefill_tokens_per_second = run == 0 ? (double?)null : tokens.Length / (wall / 1000),
                     first_token = first, first_token_matches_baseline = first == firstTokens[Name(variants[0])],

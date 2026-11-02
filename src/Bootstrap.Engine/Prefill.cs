@@ -13,6 +13,12 @@ internal sealed partial class QwenEngine
         }
     }
     public bool Fp32TensorOps { get => TensorOpsPrecision == "fp32"; set => TensorOpsPrecision = value ? "fp32" : "legacy"; }
+    bool causalDeviceAttention;
+    public bool CausalDeviceAttention { get => causalDeviceAttention; set { if (causalDeviceAttention != value) { ClearPrefixCache(); causalDeviceAttention = value; } } }
+    bool adaptiveExpertTiles;
+    public bool AdaptiveExpertTiles { get => adaptiveExpertTiles; set { if (adaptiveExpertTiles != value) { ClearPrefixCache(); adaptiveExpertTiles = value; } } }
+    bool gatheredExperts;
+    public bool GatheredExperts { get => gatheredExperts; set { if (gatheredExperts != value) { ClearPrefixCache(); gatheredExperts = value; } } }
     bool predecodedExperts;
     public bool PredecodedExperts { get => predecodedExperts; set { if (predecodedExperts != value) { ClearPrefixCache(); predecodedExperts = value; } } }
     bool predecodedProjections;
@@ -131,7 +137,7 @@ internal sealed partial class QwenEngine
                 var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f, Flags = KvFlags };
                 gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
                 if (!verify && AttentionMode == "fp16-device")
-                    deviceAttention!.Encode(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position, HalfKv);
+                    deviceAttention!.Encode(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position, HalfKv, CausalDeviceAttention);
                 else if (AttentionMode == "fused-fp16")
                     gpu.Dispatch2D("batch_attention_fused_fp16", p, (uint)((count + 15) / 16) * 128, 16, 128, b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Rotated);
                 else
@@ -169,6 +175,14 @@ internal sealed partial class QwenEngine
             void ExpertProjection(uint choice, uint rows, uint columns, GpuBuffer input, GpuBuffer result)
             {
                 bool tiny = count <= VerificationCapacity;
+                if (!tiny && GatheredExperts && TensorOpsPrecision == "fp16")
+                {
+                    b.PackedExpertInputs ??= Buffer(b.Capacity * 8 * Hidden / 2);
+                    var p = new KernelArgs { M = (uint)count * 8, N = rows, K = columns, Kind = choice, Flags = AdaptiveExpertTiles ? 1u : 0u };
+                    if (choice != 1) gpu.Dispatch("expert_input_half", p, p.M * columns / 4, 128, input, b.SortedTokens, b.PackedExpertInputs);
+                    gpu.Dispatch2D("expert_matrix_gathered", p, ((rows + 63) / 64) * 128, tileLimit, 128, b.PackedExpertInputs, raw, descriptors[layer], b.Tiles, b.TileCount, result);
+                    return;
+                }
                 if (!tiny && PredecodedExperts && TensorOpsPrecision == "fp16")
                 {
                     b.PackedExpertInputs ??= Buffer(b.Capacity * 8 * Hidden / 2);

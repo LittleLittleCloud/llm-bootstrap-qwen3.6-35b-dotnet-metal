@@ -17,7 +17,7 @@ internal sealed class DeviceAttentionWorkspace(Metal gpu) : IDisposable
         else { key?.Dispose(); value?.Dispose(); key = value = null; }
         Ensure(ref probability, Math.Min((ulong)rows * 16 * (ulong)length, ContextLimits.AttentionWorkspaceFloats) * 2);
     }
-    public void Encode(GpuBuffer q, GpuBuffer k, GpuBuffer v, GpuBuffer gate, GpuBuffer scores, GpuBuffer output, int rows, int position, bool halfKv = false)
+    public void Encode(GpuBuffer q, GpuBuffer k, GpuBuffer v, GpuBuffer gate, GpuBuffer scores, GpuBuffer output, int rows, int position, bool halfKv = false, bool causal = false)
     {
         int length = position + rows;
         void Convert(Binding source, GpuBuffer target, int floats) => gpu.Dispatch("attention_input_half", new() { N = (uint)floats }, (uint)floats / 4, 128, source, target);
@@ -32,11 +32,15 @@ internal sealed class DeviceAttentionWorkspace(Metal gpu) : IDisposable
             var input = new Binding(query!, (ulong)first * 4096 * 2);
             var result = new Binding(output, (ulong)first * 4096 * 4);
             var g = new Binding(gate, (ulong)first * 4096 * 4);
-            gpu.Dispatch2D("attention_scores_device", p, (uint)((length + 63) / 64) * 128, (uint)((count + 15) / 16) * 16, 128, input, cachedKey, scores);
-            var normalization = p; normalization.Position = (uint)(length - 1);
-            gpu.Dispatch("attention_softmax", normalization, (uint)count * 16 * 256, 256, scores);
-            Convert(scores, probability!, count * 16 * length);
-            gpu.Dispatch2D("attention_values_device", p, 4 * 128, (uint)((count + 15) / 16) * 16, 128, probability!, cachedValue, g, result);
+            gpu.Dispatch2D(causal ? "attention_scores_device_causal" : "attention_scores_device", p, (uint)((length + 63) / 64) * 128, (uint)((count + 15) / 16) * 16, 128, input, cachedKey, scores);
+            if (causal) gpu.Dispatch("attention_softmax_half_causal", p, (uint)count * 16 * 256, 256, scores, probability!);
+            else
+            {
+                var normalization = p; normalization.Position = (uint)(length - 1);
+                gpu.Dispatch("attention_softmax", normalization, (uint)count * 16 * 256, 256, scores);
+                Convert(scores, probability!, count * 16 * length);
+            }
+            gpu.Dispatch2D(causal ? "attention_values_device_causal" : "attention_values_device", p, 4 * 128, (uint)((count + 15) / 16) * 16, 128, probability!, cachedValue, g, result);
         }
     }
     public void Dispose() { query?.Dispose(); key?.Dispose(); value?.Dispose(); probability?.Dispose(); }
