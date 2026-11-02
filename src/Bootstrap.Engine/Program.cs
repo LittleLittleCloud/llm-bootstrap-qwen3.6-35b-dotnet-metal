@@ -11,6 +11,7 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
+if (command == "profile-delta") { DeltaScanTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-online-attention") { OnlineAttentionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), Option("--case"), Option("--variants"), args.Contains("--stress"), Option("--kv-cache-precision") != "fp32"); return; }
 if (command == "compare-mlx-kernels") { KernelComparisonBenchmarks.Run(File.ReadAllText(kernelFile), Option("--family") ?? "all", int.Parse(Option("--runs") ?? "9")); return; }
 if (command == "profile-expert-fusion") { ExpertFusionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }

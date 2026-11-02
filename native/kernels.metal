@@ -1323,3 +1323,61 @@ template [[host_name("expert_matrix_layout2")]] kernel decltype(expert_staged<fa
 template [[host_name("expert_gate_up_layout2")]] kernel decltype(expert_staged<false,true,32,2>) expert_staged<false,true,32,2>;
 template [[host_name("expert_matrix_layout2_pipeline")]] kernel decltype(expert_staged<true,false,32,2>) expert_staged<true,false,32,2>;
 template [[host_name("expert_gate_up_layout2_pipeline")]] kernel decltype(expert_staged<true,true,32,2>) expert_staged<true,true,32,2>;
+
+kernel void batch_delta_gates(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*v [[buffer(2)]],device const float*a [[buffer(3)]],device const float*b [[buffer(4)]],device const ushort*alog [[buffer(5)]],device const ushort*dt [[buffer(6)]],device float*state [[buffer(7)]],device float*y [[buffer(8)]],device float*tape [[buffer(9)]],device const float*gates [[buffer(10)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+    uint row=g/32,h=row/128,d=row%128;if(h>=32)return;uint base=(h*128+d)*128+lane,kh=h/2;float4 cell=float4(state[base],state[base+32],state[base+64],state[base+96]);float gain=exp(bf(alog[h])),bias=bf(dt[h]);
+    for(uint t=0;t<p.m;++t){uint key=t*2048+kh*128+lane;float4 kv=float4(k[key],k[key+32],k[key+64],k[key+96]),qv=float4(q[key],q[key+32],q[key+64],q[key+96]);cell*=gates[t*64+h];float prediction=simd_sum(dot(cell,kv)),correction=gates[t*64+32+h]*(v[t*8192+4096+h*128+d]-prediction);cell+=correction*kv;float value=simd_sum(dot(cell,qv));if(lane==0)y[t*4096+h*128+d]=value;if(p.flags&1){uint at=t*524288+base;tape[at]=cell.x;tape[at+32]=cell.y;tape[at+64]=cell.z;tape[at+96]=cell.w;}}
+    state[base]=cell.x;state[base+32]=cell.y;state[base+64]=cell.z;state[base+96]=cell.w;
+}
+
+// Development variants retain FP32 Q/K/V, outputs, and recurrent state.
+// Precompute token/head gates once instead of in each value-row recurrence.
+kernel void delta_prepare_gates(device const float*a [[buffer(0)]],device const float*b [[buffer(1)]],device const ushort*alog [[buffer(2)]],device const ushort*dt [[buffer(3)]],device float*gates [[buffer(4)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i>=p.m*32)return;uint t=i/32,h=i%32;
+    gates[t*64+h]=exp(-exp(bf(alog[h]))*softplus(a[i]+bf(dt[h])));
+    gates[t*64+32+h]=sigmoid(b[i]);
+}
+
+// Eight lanes share a value row. A group carries sixteen rows in registers.
+// Blocked variants share Q/K across those rows, without changing input precision.
+template<int Block,bool Staged>
+kernel void delta_scan(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*v [[buffer(2)]],device const float*gates [[buffer(3)]],device float*state [[buffer(4)]],device float*y [[buffer(5)]],constant P&p [[buffer(15)]],uint group [[threadgroup_position_in_grid]],uint tid [[thread_index_in_threadgroup]]) {
+    uint h=group/8,first=(group%8)*16,row=tid/8,col=(tid%8)*16,kh=h/2;
+    uint base=(h*128+first+row)*128+col;
+    float4 cell[4];
+    for(uint j=0;j<4;j++)cell[j]=*((device const float4*)(state+base+j*4));
+    threadgroup float keys[Staged?Block*128:1],queries[Staged?Block*128:1];
+    threadgroup float values[Staged?Block*16:1],decay[Staged?Block:1],beta[Staged?Block:1];
+    for(uint start=0;start<p.m;start+=Block){
+        uint count=min(uint(Block),p.m-start);
+        if constexpr(Staged){
+            for(uint i=tid;i<count*128;i+=128){uint t=start+i/128,c=i%128;keys[i]=k[t*2048+kh*128+c];queries[i]=q[t*2048+kh*128+c];}
+            for(uint i=tid;i<count*16;i+=128)values[i]=v[(start+i/16)*8192+4096+h*128+first+i%16];
+            if(tid<count){decay[tid]=gates[(start+tid)*64+h];beta[tid]=gates[(start+tid)*64+32+h];}
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        for(uint t=0;t<count;t++){
+            float d=Staged?decay[t]:gates[(start+t)*64+h];
+            float b=Staged?beta[t]:gates[(start+t)*64+32+h];
+            float value=Staged?values[t*16+row]:v[(start+t)*8192+4096+h*128+first+row];
+            float4 kv[4],qv[4],partial=0;
+            for(uint j=0;j<4;j++){
+                if constexpr(Staged){kv[j]=*((threadgroup float4*)(keys+t*128+col+j*4));qv[j]=*((threadgroup float4*)(queries+t*128+col+j*4));}
+                else {kv[j]=*((device const float4*)(k+(start+t)*2048+kh*128+col+j*4));qv[j]=*((device const float4*)(q+(start+t)*2048+kh*128+col+j*4));}
+                cell[j]*=d;partial=fma(cell[j],kv[j],partial);
+            }
+            float prediction=(partial.x+partial.y)+(partial.z+partial.w);
+            for(uint step=1;step<8;step*=2)prediction+=simd_shuffle_xor(prediction,step);
+            float correction=b*(value-prediction);partial=0;
+            for(uint j=0;j<4;j++){cell[j]=fma(correction,kv[j],cell[j]);partial=fma(cell[j],qv[j],partial);}
+            float out=(partial.x+partial.y)+(partial.z+partial.w);
+            for(uint step=1;step<8;step*=2)out+=simd_shuffle_xor(out,step);
+            if(tid%8==0)y[(start+t)*4096+h*128+first+row]=out;
+        }
+        if constexpr(Staged)threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for(uint j=0;j<4;j++)*((device float4*)(state+base+j*4))=cell[j];
+}
+template [[host_name("delta_direct8")]] kernel decltype(delta_scan<16,false>) delta_scan<16,false>;
+template [[host_name("delta_staged8")]] kernel decltype(delta_scan<8,true>) delta_scan<8,true>;
+template [[host_name("delta_staged16")]] kernel decltype(delta_scan<16,true>) delta_scan<16,true>;
