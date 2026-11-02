@@ -725,3 +725,9 @@ python3 scripts/summarize-moe-experiments.py artifacts/moe-pipeline
 Raw JSONL, shader-validation logs, failed attempts and environment evidence stay
 local under `artifacts/moe-pipeline/`. Formal evaluation uses a separately frozen
 derived experiment and the repository-owned evaluator.
+
+The follow-up [prefill research note](docs/prefill-research-2026-11-02.md) records
+updated profiles, byte-preserving FP8 layout experiments, negative Dense tile
+results, and the opt-in `--delta-mode staged8` recurrence. This development path
+keeps FP32 state and has paired local speedups; it is not yet a new official
+endpoint result or the serving default.

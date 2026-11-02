@@ -6,15 +6,16 @@ namespace Bootstrap.Engine;
 // reference. It does not load a model or contribute leaderboard measurements.
 internal static class ExpertThroughputTests
 {
-    public static void Run(string source, int runs, bool comparison = false)
+    public static void Run(string source, int runs, bool comparison = false, bool layouts = false, bool reverse = false)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
-        var variants = comparison ? new[] { ("adaptive", true, true), ("adaptive_core", true, true), ("fp16_predecoded", true, false) } : new[] { ("baseline", false, false), ("gathered", true, false), ("adaptive", true, true), ("staged", true, true), ("pipeline", true, true), ("staged64", true, true), ("staged128", true, true) };
+        var variants = layouts ? new[] { ("staged", true, true), ("pipeline", true, true), ("layout1", true, true), ("layout1_pipeline", true, true), ("layout2", true, true), ("layout2_pipeline", true, true) } : comparison ? new[] { ("adaptive", true, true), ("adaptive_core", true, true), ("fp16_predecoded", true, false) } : new[] { ("baseline", false, false), ("gathered", true, false), ("adaptive", true, true), ("staged", true, true), ("pipeline", true, true), ("staged64", true, true), ("staged128", true, true) };
         using var gpu = new Metal(source);
         foreach (int k in new[] {2048,512})
         {
             int n=k==2048?512:2048, m=2048*8, experts=256, scaleCount=n/128*(k/128), slot=n*k+scaleCount*2;
             using var x=gpu.Allocate((ulong)m*(ulong)k*4);using var packedX=gpu.Allocate((ulong)m*(ulong)k*2);using var raw=gpu.Allocate((ulong)experts*(ulong)slot);
+            using var repacked=layouts?gpu.Allocate((ulong)experts*(ulong)slot):null;
             using var descriptors=gpu.Allocate((ulong)experts*48);using var tiles=gpu.Allocate((ulong)experts*5*16);
             using var tileCount=gpu.Allocate(4);using var tokens=gpu.Allocate((ulong)m*4);using var y=gpu.Allocate((ulong)(m*n+1)*4);
             for(int i=0;i<m*k;i++) x.Values<float>(m*k)[i]=((i*7L+i/113)%67-33)/64f;
@@ -44,9 +45,22 @@ internal static class ExpertThroughputTests
                 tileCount.Values<uint>(1)[0]=(uint)nt;
                 var pack=new KernelArgs{M=(uint)m,K=(uint)k,Kind=k==512?2u:0u};
                 gpu.Begin();gpu.Dispatch("expert_input_half",pack,(uint)(m*k/4),128,x,tokens,packedX);gpu.End();
-                foreach(var (name,packed,adaptive) in variants)
+                float[]? reference=null;
+                foreach(var (name,packed,adaptive) in reverse ? variants.Reverse() : variants)
                 {
-                    bool staged = name.StartsWith("staged") || name == "pipeline";
+                    bool staged = name.StartsWith("staged") || name == "pipeline" || name.StartsWith("layout");
+                    int layout=name.StartsWith("layout1")?1:name.StartsWith("layout2")?2:0;
+                    if(layout!=0) {
+                        raw.Values<byte>(checked((int)raw.Length)).CopyTo(repacked!.Values<byte>(checked((int)raw.Length)));
+                        gpu.Begin();gpu.Dispatch("expert_repack_bytes",new(){N=(uint)n,K=(uint)k,A=256,Kind=k==512?2u:0u,Flags=(uint)layout},(uint)(experts*n*k),256,raw,descriptors,repacked);gpu.End();
+                        for(int e=0;e<experts;e++) {
+                            var src=raw.Values<byte>(n*k,(ulong)(e*slot));var dst=repacked.Values<byte>(n*k,(ulong)(e*slot));
+                            for(int r=0;r<n;r++)for(int c=0;c<k;c++) {
+                                int at=r/32*k*32+c/32*1024+(layout==1?r%32*32+c%32:c%32/4*128+r%32*4+c%4);
+                                if(src[r*k+c]!=dst[at])throw new Exception("Repack changed a weight byte");
+                            }
+                        }
+                    }
                     first=0;nt=0;
                     int tileRows=staged?32:64;
                     for(int e=0;e<experts;e++) {
@@ -65,13 +79,13 @@ internal static class ExpertThroughputTests
                         gpu.Begin();
                         if(packed && name!="adaptive_core")gpu.Dispatch("expert_input_half",pack,(uint)(m*k/4),128,x,tokens,packedX);
                         if(name=="fp16_predecoded")gpu.Dispatch2D("expert_matrix_predecoded",p,(uint)((n+63)/64*128),(uint)(nt+1),128,packedX,decodedWeights!,tiles,tileCount,y);
-                        else if(packed)gpu.Dispatch2D(kernel,p,(uint)((n+63)/64*groups*32),(uint)(nt+1),(uint)(groups*32),packedX,raw,descriptors,tiles,tileCount,y);
+                        else if(packed)gpu.Dispatch2D(kernel,p,(uint)((n+63)/64*groups*32),(uint)(nt+1),(uint)(groups*32),packedX,layout!=0?repacked!:raw,descriptors,tiles,tileCount,y);
                         else gpu.Dispatch2D(kernel,p,(uint)((n+63)/64*groups*32),(uint)(nt+1),(uint)(groups*32),x,raw,descriptors,tiles,tileCount,tokens,y);
                         gpu.End();
                     }
                     for(int run=0;run<=runs;run++)
                     {
-                        if(comparison && run==1) { var warm=Stopwatch.StartNew();while(warm.Elapsed.TotalMilliseconds<250)Encode(); }
+                        if((comparison || layouts) && run==1) { var warm=Stopwatch.StartNew();while(warm.Elapsed.TotalMilliseconds<250)Encode(); }
                         gpu.ResetWallTiming();var watch=Stopwatch.StartNew();Encode();
                         double wall=watch.Elapsed.TotalMilliseconds;
                         if(run==0)
@@ -89,6 +103,10 @@ internal static class ExpertThroughputTests
                                 }
                                 float actual=y.Values<float>(m*n)[row*n+c];double error=Math.Abs(actual-expected);worst=Math.Max(worst,error);
                                 if(!float.IsFinite(actual)||error>1e-6+3e-6*mag)throw new Exception($"{name}/{k}/{skew}/{row}/{c}: {actual} vs {expected}");
+                            }
+                            if(layouts) {
+                                var actual=y.Values<float>(m*n);reference??=actual.ToArray();
+                                for(int i=0;i<actual.Length;i++)if(!float.IsFinite(actual[i])||actual[i]!=reference[i])throw new Exception($"Layout output mismatch {name}/{k}/{skew}/{i}");
                             }
                             if(!float.IsNaN(y.Values<float>(m*n+1)[m*n]))throw new Exception("Output guard overwritten");
                             Console.WriteLine(JsonSerializer.Serialize(new{type="expert_check",name,k,n,skew,max_abs_error=worst}));
