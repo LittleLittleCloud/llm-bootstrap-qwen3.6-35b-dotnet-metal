@@ -9,13 +9,13 @@ internal static class ExpertThroughputTests
     public static void Run(string source, int runs, bool comparison = false)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
-        var variants = comparison ? new[] { ("adaptive", true, true), ("adaptive_core", true, true), ("fp16_predecoded", true, false) } : new[] { ("baseline", false, false), ("gathered", true, false), ("adaptive", true, true) };
+        var variants = comparison ? new[] { ("adaptive", true, true), ("adaptive_core", true, true), ("fp16_predecoded", true, false) } : new[] { ("baseline", false, false), ("gathered", true, false), ("adaptive", true, true), ("staged", true, true), ("pipeline", true, true), ("staged64", true, true), ("staged128", true, true) };
         using var gpu = new Metal(source);
         foreach (int k in new[] {2048,512})
         {
             int n=k==2048?512:2048, m=2048*8, experts=256, scaleCount=n/128*(k/128), slot=n*k+scaleCount*2;
             using var x=gpu.Allocate((ulong)m*(ulong)k*4);using var packedX=gpu.Allocate((ulong)m*(ulong)k*2);using var raw=gpu.Allocate((ulong)experts*(ulong)slot);
-            using var descriptors=gpu.Allocate((ulong)experts*48);using var tiles=gpu.Allocate((ulong)experts*3*16);
+            using var descriptors=gpu.Allocate((ulong)experts*48);using var tiles=gpu.Allocate((ulong)experts*5*16);
             using var tileCount=gpu.Allocate(4);using var tokens=gpu.Allocate((ulong)m*4);using var y=gpu.Allocate((ulong)(m*n+1)*4);
             for(int i=0;i<m*k;i++) x.Values<float>(m*k)[i]=((i*7L+i/113)%67-33)/64f;
             for(int e=0;e<experts;e++)
@@ -46,8 +46,18 @@ internal static class ExpertThroughputTests
                 gpu.Begin();gpu.Dispatch("expert_input_half",pack,(uint)(m*k/4),128,x,tokens,packedX);gpu.End();
                 foreach(var (name,packed,adaptive) in variants)
                 {
+                    bool staged = name.StartsWith("staged") || name == "pipeline";
+                    first=0;nt=0;
+                    int tileRows=staged?32:64;
+                    for(int e=0;e<experts;e++) {
+                        int rows=skew?(e%2==0?1:127):64;
+                        for(int r=0;r<rows;r+=tileRows){var t=tiles.Values<uint>(experts*5*4);t[nt*4]=(uint)e;t[nt*4+1]=(uint)(first+r);t[nt*4+2]=(uint)Math.Min(tileRows,rows-r);nt++;}
+                        first+=rows;
+                    }
+                    tileCount.Values<uint>(1)[0]=(uint)nt;
                     string kernel=packed?"expert_matrix_gathered":"expert_matrix_fp16_tile64_up";
-                    int groups=packed?4:8;
+                    int groups=staged?2:packed?4:8;
+                    if(staged)kernel=name=="pipeline"?"expert_matrix_pipeline":"expert_matrix_"+name;
                     y.Values<float>(m*n+1).Fill(float.NaN);
                     var p=new KernelArgs{N=(uint)n,K=(uint)k,Kind=k==512?2u:0u,Flags=adaptive?1u:0u};
                     void Encode()

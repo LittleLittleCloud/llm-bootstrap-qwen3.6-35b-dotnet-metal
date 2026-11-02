@@ -646,3 +646,82 @@ check improves 1548.73→1678.54 tok/s (+8.4%). Short batches retain the previou
 causal kernel. [Implementation, tuning, dedicated benchmarks and validation](docs/ONLINE_ATTENTION.md)
 document the selected path and precision differences. These development
 results do not replace the existing formal evaluation of the predecessor.
+
+## Staged FP8 MoE prefill (November 2, 2026)
+
+The next `--tuned-prefill` revision uses 32-row grouped expert tiles with
+8/16/32-row tail matrices, each SIMD group owning 32 output columns and a
+32-element K step. Gate and up execute in one dispatch, keep FP32 accumulators
+and gate intermediates in threadgroup memory, and write the SiLU product directly
+as FP16 for down. The checkpoint remains FP8 E4M3 with its existing BF16 block
+scales. Shared-expert projections and the small verification/decode path retain
+their previous implementation.
+
+A cooperative grouping kernel replaces separate per-expert count/scan kernels.
+It scans routes twice across 256 threads, builds prefix offsets and tiles, and
+uses an inverse mapping to restore token/top-k order. Order within an expert is
+unspecified. Expert dispatches still use the existing maximum grid with early
+returns; this change does not implement indirect dispatch.
+
+Paired local measurements use the same public 10,520/29,939-token fixtures as
+the preceding profile, 32K context, FP16 KV, DFlash2, enabled prefix checkpoints,
+and a cleared reusable prefix before every request. One cold full-answer run
+checks the needle, followed by three warm one-token runs with alternating order.
+These are development timings, excluding loading/tokenization and including the
+first-token generation work; they do not replace endpoint-bench results.
+
+| Configuration | 10K wall median | 30K wall median |
+| --- | ---: | ---: |
+| Previous gathered/adaptive experts | 6.272 s | 20.067 s |
+| Staged 32-row experts | 6.175 s | Not separately measured |
+| Staged + fused gate/up/SiLU | 6.118 s | Not separately measured |
+| Staged + fusion + cooperative grouping | 5.834 s | 18.815 s |
+
+The combined throughput gain is 7.5% at 10K and 6.7% at 30K in these fixtures.
+Every configuration returned the complete expected needle code. The 10K smoke
+also checks finite full-vocabulary logits; a few correct answers are not a broad
+model-quality result. All warm runs are retained, not just the fastest.
+
+### Rejected alternatives and numerical checks
+
+Register prefetch with alternating FP16 stages was slower on the current FP8
+layout than the simple K=32 loop. K=64 and K=128 staged alternatives were slower
+as well. They remain available only in development microbenchmarks for inspection;
+the serving preset does not select them. No MLX or Splash runtime is used.
+The design was informed by Splash's public implementation at
+`1482f6bbc2abf12375332725302019594150b6cb`, but there is no new matched Splash
+measurement in this experiment.
+
+An initial prototype returned zero accumulators when passing a computed
+cooperative tensor by value. The working implementation initializes it in the
+caller and passes it by reference; the failed run is retained in local evidence.
+Independent CPU checks cover projection and gate/up values, varying FP8 scales,
+distinct gate/up weights and gathered token indices. Full-array fusion comparisons
+cover 32/257/2048-token uniform and skewed cases. Routing checks every route,
+expert count, offset, tile, inverse mapping and output guard at 1/7/32/257/2048
+tokens and 16/32/64-row tiles, including empty experts.
+
+### Reproduce
+
+Use the same model/draft arguments and context ceiling as above. With
+`--tuned-prefill`, `--expert-kernel baseline --serial-expert-routing` selects the
+previous expert path; `--expert-kernel staged` isolates the smaller matrix tiles,
+and `--expert-kernel fused` selects fusion. Routing can be selected independently
+with `--parallel-expert-routing` or `--serial-expert-routing`. Changing either
+engine setting invalidates the prefix cache. The preset selects fused experts
+and parallel routing, only beyond the verification-sized batches.
+
+```sh
+dotnet run -c Release --project src/Bootstrap.Engine -- profile-experts --runs 5
+dotnet run -c Release --project src/Bootstrap.Engine -- profile-expert-fusion --runs 5
+dotnet run -c Release --project src/Bootstrap.Engine -- profile-expert-routing --runs 5
+# With --model-dir, --draft-dir, --tuned-prefill and --context-window 32768:
+# compare-prefill-variants --moe-variants --runs 3 --prompt-file <public fixture> --expected-answer <code>
+# compare-prefill-variants --moe-final-variants ... compares only baseline/final.
+# moe-self-tests runs verification and prefix-cache regressions on the selected path.
+python3 scripts/summarize-moe-experiments.py artifacts/moe-pipeline
+```
+
+Raw JSONL, shader-validation logs, failed attempts and environment evidence stay
+local under `artifacts/moe-pipeline/`. Formal evaluation uses a separately frozen
+derived experiment and the repository-owned evaluator.
