@@ -136,7 +136,7 @@ internal sealed partial class QwenEngine
             }
             else
             {
-                Add(keyCache[layer], consumed * 512 * sizeof(float)); Add(valueCache[layer], consumed * 512 * sizeof(float));
+                Add(keyCache[layer], consumed * 512 * KvElementBytes); Add(valueCache[layer], consumed * 512 * KvElementBytes);
             }
         Add(logits, Vocabulary * sizeof(float));
         if (ActiveDraft is { } drafting)

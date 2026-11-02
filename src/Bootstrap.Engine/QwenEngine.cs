@@ -13,6 +13,11 @@ internal sealed partial class QwenEngine : IDisposable
     GpuBuffer scores;
     public int ContextWindow => Context;
     public int CacheCapacity => cacheCapacity;
+    public string KvCachePrecision { get; }
+    bool HalfKv => KvCachePrecision == "fp16";
+    int KvElementBytes => HalfKv ? 2 : 4;
+    uint KvFlags => HalfKv ? 256u : 0u;
+    public ulong TargetKvBytes => (ulong)cacheCapacity * 512 * 20 * (ulong)KvElementBytes;
     public static int ValidateContextWindow(int contextWindow) => contextWindow is >= 1 and <= MaximumContextWindow ? contextWindow : throw new ArgumentOutOfRangeException(nameof(contextWindow), "Context window must fit the model's native 262144-token window");
     readonly Metal gpu;
     readonly Checkpoint weights;
@@ -22,8 +27,10 @@ internal sealed partial class QwenEngine : IDisposable
     public ByteBpe Tokenizer { get; }
     public ulong AllocatedBytes => gpu.AllocatedBytes;
     GpuBuffer Buffer(int floats) { var result = gpu.Allocate(checked((ulong)floats * 4)); owned.Add(result); return result; }
-    public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow)
+    public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow, string kvCachePrecision = "fp32")
     {
+        if (kvCachePrecision is not ("fp16" or "fp32")) throw new ArgumentException("KV cache precision must be fp16 or fp32");
+        KvCachePrecision = kvCachePrecision;
         Context = ValidateContextWindow(contextWindow);
         cacheCapacity = Math.Min(Context, 4096);
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
@@ -39,7 +46,7 @@ internal sealed partial class QwenEngine : IDisposable
         for (int layer = 0; layer < 40; layer++)
         {
             if ((layer + 1) % 4 != 0) { state[layer] = Buffer(32 * 128 * 128); convolution[layer] = Buffer(3 * 8192); }
-            else { keyCache[layer] = Buffer(cacheCapacity * 512); valueCache[layer] = Buffer(cacheCapacity * 512); }
+            else { keyCache[layer] = Buffer(cacheCapacity * 512 * KvElementBytes / 4); valueCache[layer] = Buffer(cacheCapacity * 512 * KvElementBytes / 4); }
             descriptors[layer] = Buffer(256 * 6 * 2);
             var table = descriptors[layer].Values<ulong>(256 * 6);
             string prefix = Prefix(layer) + ".mlp.experts.";
@@ -53,11 +60,11 @@ internal sealed partial class QwenEngine : IDisposable
             }
         }
     }
-    void Grow(ref GpuBuffer buffer, int floats)
+    void Grow(ref GpuBuffer buffer, int elements, int elementBytes = 4)
     {
-        if ((ulong)floats * sizeof(float) <= buffer.Length) return;
-        var replacement = Buffer(floats);
-        buffer.Values<float>(checked((int)(buffer.Length / sizeof(float)))).CopyTo(replacement.Values<float>(floats));
+        if ((ulong)elements * (ulong)elementBytes <= buffer.Length) return;
+        var replacement = Buffer(checked(elements * elementBytes / 4));
+        buffer.Values<byte>(checked((int)buffer.Length)).CopyTo(replacement.Values<byte>(checked((int)buffer.Length)));
         owned.Remove(buffer); buffer.Dispose(); buffer = replacement;
     }
     void EnsureCacheCapacity(int required)
@@ -69,12 +76,12 @@ internal sealed partial class QwenEngine : IDisposable
         // No command is active here. Preserve all existing KV positions during decode/prefill growth.
         for (int layer = 3; layer < 40; layer += 4)
         {
-            Grow(ref keyCache[layer], checked(capacity * 512));
-            Grow(ref valueCache[layer], checked(capacity * 512));
+            Grow(ref keyCache[layer], checked(capacity * 512), KvElementBytes);
+            Grow(ref valueCache[layer], checked(capacity * 512), KvElementBytes);
         }
         Grow(ref scores, checked(capacity * 16));
         cacheCapacity = capacity;
-        Console.Error.WriteLine($"KV capacity grew to {capacity} tokens; Metal buffer bytes={AllocatedBytes}");
+        Console.Error.WriteLine($"KV capacity grew to {capacity} tokens; KV precision={KvCachePrecision}; target KV bytes={TargetKvBytes}; Metal buffer bytes={AllocatedBytes}");
     }
     static string Prefix(int layer) => "model.language_model.layers." + layer;
     void Project(string name, GpuBuffer input, GpuBuffer output)
@@ -126,7 +133,7 @@ internal sealed partial class QwenEngine : IDisposable
                 Project(path + ".q_proj", norm, qkv); Project(path + ".k_proj", norm, k); Project(path + ".v_proj", norm, v);
                 gpu.Dispatch("split_q", new(), 4096, 128, qkv, q, qgate);
                 Normalize(q, path + ".q_norm", q, 256, 16); Normalize(k, path + ".k_norm", k, 256, 2);
-                var attentionArgs = new KernelArgs { Position = (uint)position, K = (uint)cacheCapacity, Theta = 10_000_000f };
+                var attentionArgs = new KernelArgs { Position = (uint)position, K = (uint)cacheCapacity, Theta = 10_000_000f, Flags = KvFlags };
                 gpu.Dispatch("rope_cache", attentionArgs, 4096, 128, q, k, v, rotated, keyCache[layer], valueCache[layer]);
                 gpu.Dispatch("attention_scores", attentionArgs, checked((uint)(16 * (position + 1) * 32)), 128, rotated, keyCache[layer], scores);
                 gpu.Dispatch("attention_softmax", attentionArgs, 16 * 256, 256, scores);
@@ -167,7 +174,7 @@ internal sealed partial class QwenEngine : IDisposable
             {
                 cancellation.ThrowIfCancellationRequested();
                 int boundary = boundaries.First(p => p > position);
-                int count = ContextLimits.PrefillCount(position, boundary - position);
+                int count = WidePrefill ? Math.Min(PrefillBatchSize, boundary - position) : ContextLimits.PrefillCount(position, boundary - position);
                 bool checkpoint = position + count == boundary;
                 if (BatchedPrefill && count >= 8)
                 {
@@ -232,6 +239,6 @@ internal sealed partial class QwenEngine : IDisposable
             ClearPrefixCache(); throw;
         }
     }
-    public void Dispose() { draft?.Dispose(); foreach (var buffer in owned) buffer.Dispose(); weights.Dispose(); gpu.Dispose(); }
+    public void Dispose() { deviceAttention?.Dispose(); draft?.Dispose(); foreach (var buffer in owned) buffer.Dispose(); weights.Dispose(); gpu.Dispose(); }
 }
 internal sealed record Generation(string Text, int PromptTokens, int[] Tokens, string FinishReason, int CachedTokens = 0);
