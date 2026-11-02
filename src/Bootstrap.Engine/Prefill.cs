@@ -2,6 +2,15 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    string deltaMode = "baseline";
+    public string DeltaMode
+    {
+        get => deltaMode;
+        set {
+            if (value is not ("baseline" or "gates" or "direct8" or "staged8" or "staged16")) throw new ArgumentException("Invalid DeltaNet mode");
+            if (deltaMode != value) { ClearPrefixCache(); deltaMode = value; }
+        }
+    }
     string tensorOpsPrecision = "legacy";
     public string TensorOpsPrecision
     {
@@ -72,7 +81,7 @@ internal sealed partial class QwenEngine
     sealed class BatchBuffers
     {
         public readonly int Capacity;
-        public GpuBuffer? PackedInputs, PackedWeights, PackedExpertInputs, PackedExpertWeights;
+        public GpuBuffer? DeltaGates, PackedInputs, PackedWeights, PackedExpertInputs, PackedExpertWeights;
         public readonly GpuBuffer Tokens, Hidden, Norm, Projection, Qkv, Z, A, B, Conv, Q, K, V, Rotated, Qgate, Scores, Router, Ids, Rates, Counts, Offsets, Tiles, TileCount, SortedTokens, Inverse, ExpertGate, ExpertUp, ExpertActivation, ExpertOutput, SharedGate, SharedUp, SharedActivation, SharedOutput, SharedWeight;
         public BatchBuffers(QwenEngine engine)
         {
@@ -123,6 +132,8 @@ internal sealed partial class QwenEngine
         if (count > b.Capacity) throw new ArgumentException("Batch exceeds allocated workspace");
         EnsureCacheCapacity(position + count);
         ActiveDraft?.EnsureFeatureCapacity(count);
+        bool optimizedDelta = !verify && count > VerificationCapacity && DeltaMode != "baseline";
+        if (optimizedDelta) b.DeltaGates ??= Buffer(b.Capacity * 64);
         if (!verify && (AttentionMode is "fp16-device" or "fp16-online")) { deviceAttention ??= new(gpu); deviceAttention.Prepare(count, position + count, HalfKv, AttentionMode == "fp16-online"); }
         gpu.Begin();
         gpu.Dispatch("batch_embedding", new() { M = (uint)count }, checked((uint)count * Hidden), 128, weights["model.language_model.embed_tokens.weight"].Binding, b.Tokens, b.Hidden);
@@ -135,6 +146,11 @@ internal sealed partial class QwenEngine
                 BatchProject(path + ".in_proj_qkv", b.Norm, b.Qkv, count); BatchProject(path + ".in_proj_z", b.Norm, b.Z, count); BatchProject(path + ".in_proj_a", b.Norm, b.A, count); BatchProject(path + ".in_proj_b", b.Norm, b.B, count);
                 gpu.Dispatch("batch_conv", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 8192, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv, verify ? verification!.Convolution[layer] : dummy);
                 gpu.Dispatch("batch_l2", new() { M = (uint)count }, checked((uint)count * 16 * 128), 128, b.Conv, b.Q, b.K);
+                if (optimizedDelta) {
+                    gpu.Dispatch("delta_prepare_gates", new() { M = (uint)count }, (uint)count * 32, 128, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, b.DeltaGates!);
+                    if (DeltaMode == "gates") gpu.Dispatch("batch_delta_gates", new() { M = (uint)count }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, state[layer], b.Rotated, dummy, b.DeltaGates!);
+                    else gpu.Dispatch("delta_" + DeltaMode, new() { M = (uint)count }, 32 * 8 * 128, 128, b.Q, b.K, b.Conv, b.DeltaGates!, state[layer], b.Rotated);
+                } else
                 gpu.Dispatch("batch_delta", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, state[layer], b.Rotated, verify ? verification!.State[layer] : dummy);
                 Normalize(b.Rotated, path + ".norm", b.Rotated, 128, checked((uint)count * 32), false, b.Z);
                 BatchProject(path + ".out_proj", b.Rotated, b.Projection, count);

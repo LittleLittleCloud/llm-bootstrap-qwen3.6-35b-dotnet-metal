@@ -41,6 +41,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.AdaptiveExpertTiles = tunedPrefill || args.Contains("--adaptive-expert-tiles");
         engine.CausalDeviceAttention = tunedPrefill || args.Contains("--causal-attention");
         engine.GatheredExperts = args.Contains("--gathered-experts") || (tunedPrefill && !args.Contains("--predecoded-experts"));
+        engine.DeltaMode = Option("--delta-mode") ?? "baseline";
         engine.ExpertKernel = Option("--expert-kernel") ?? (tunedPrefill ? "fused" : "baseline");
         engine.ParallelExpertRouting = args.Contains("--parallel-expert-routing") || (tunedPrefill && !args.Contains("--serial-expert-routing"));
         engine.PredecodedExperts = args.Contains("--predecoded-experts");
@@ -52,7 +53,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         if (command == "kv-cache-self-test") { engine.KvCacheSelfTest(); return; }
         if (command == "speculation-self-test") { engine.SpeculationSelfTest(); return; }
         if (command == "compare-decode-variants") { engine.CompareDecodeVariants(int.Parse(Option("--runs") ?? "3")); return; }
-        if (command == "compare-prefill-variants") { engine.ComparePrefillVariants(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required"), args.Contains("--fast-variants"), args.Contains("--projection-variants"), args.Contains("--batch-variants"), args.Contains("--tuned-variants"), args.Contains("--expert-variants"), args.Contains("--final-variants"), args.Contains("--throughput-variants"), args.Contains("--online-variants"), args.Contains("--moe-variants"), args.Contains("--moe-final-variants")); return; }
+        if (command == "compare-prefill-variants") { engine.ComparePrefillVariants(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required"), args.Contains("--fast-variants"), args.Contains("--projection-variants"), args.Contains("--batch-variants"), args.Contains("--tuned-variants"), args.Contains("--expert-variants"), args.Contains("--final-variants"), args.Contains("--throughput-variants"), args.Contains("--online-variants"), args.Contains("--moe-variants"), args.Contains("--moe-final-variants"), args.Contains("--delta-variants"), args.Contains("--delta-final-variants")); return; }
         if (command == "compare-tensorops") { engine.CompareTensorOps(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3")); return; }
         if (command == "profile-prefill") { engine.ProfilePrefill(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), args.Contains("--all-kernels")); return; }
         if (command == "profile-decode") { engine.ProfileDecode(); return; }
