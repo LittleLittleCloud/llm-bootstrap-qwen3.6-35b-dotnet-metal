@@ -6,10 +6,10 @@ namespace Bootstrap.Engine;
 // reference. It does not load a model or contribute leaderboard measurements.
 internal static class ExpertThroughputTests
 {
-    public static void Run(string source, int runs)
+    public static void Run(string source, int runs, bool comparison = false)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
-        var variants = new[] { ("baseline", false, false), ("gathered", true, false), ("adaptive", true, true) };
+        var variants = comparison ? new[] { ("adaptive", true, true), ("adaptive_core", true, true), ("fp16_predecoded", true, false) } : new[] { ("baseline", false, false), ("gathered", true, false), ("adaptive", true, true) };
         using var gpu = new Metal(source);
         foreach (int k in new[] {2048,512})
         {
@@ -28,6 +28,8 @@ internal static class ExpertThroughputTests
                 raw.Values<ushort>(scaleCount,offset+(ulong)(n*k)).Fill(0x3b80);
             }
             for(int i=0;i<m;i++)tokens.Values<uint>(m)[i]=(uint)((i*31+7)%2048);
+            using var decodedWeights = comparison ? gpu.Allocate((ulong)experts*(ulong)n*(ulong)k*2) : null;
+            if (comparison) { gpu.Begin(); gpu.Dispatch("expert_unpack_half",new(){A=(uint)experts,N=(uint)n,K=(uint)k,Kind=0},(uint)(experts*n*k/4),128,raw,descriptors,decodedWeights!);gpu.End(); }
             foreach(bool skew in new[]{false,true})
             {
                 int first=0,nt=0;
@@ -48,13 +50,19 @@ internal static class ExpertThroughputTests
                     int groups=packed?4:8;
                     y.Values<float>(m*n+1).Fill(float.NaN);
                     var p=new KernelArgs{N=(uint)n,K=(uint)k,Kind=k==512?2u:0u,Flags=adaptive?1u:0u};
-                    for(int run=0;run<=runs;run++)
+                    void Encode()
                     {
-                        gpu.ResetWallTiming();var watch=Stopwatch.StartNew();gpu.Begin();
-                        if(packed)gpu.Dispatch("expert_input_half",pack,(uint)(m*k/4),128,x,tokens,packedX);
-                        if(packed)gpu.Dispatch2D(kernel,p,(uint)((n+63)/64*groups*32),(uint)(nt+1),(uint)(groups*32),packedX,raw,descriptors,tiles,tileCount,y);
+                        gpu.Begin();
+                        if(packed && name!="adaptive_core")gpu.Dispatch("expert_input_half",pack,(uint)(m*k/4),128,x,tokens,packedX);
+                        if(name=="fp16_predecoded")gpu.Dispatch2D("expert_matrix_predecoded",p,(uint)((n+63)/64*128),(uint)(nt+1),128,packedX,decodedWeights!,tiles,tileCount,y);
+                        else if(packed)gpu.Dispatch2D(kernel,p,(uint)((n+63)/64*groups*32),(uint)(nt+1),(uint)(groups*32),packedX,raw,descriptors,tiles,tileCount,y);
                         else gpu.Dispatch2D(kernel,p,(uint)((n+63)/64*groups*32),(uint)(nt+1),(uint)(groups*32),x,raw,descriptors,tiles,tileCount,tokens,y);
                         gpu.End();
+                    }
+                    for(int run=0;run<=runs;run++)
+                    {
+                        if(comparison && run==1) { var warm=Stopwatch.StartNew();while(warm.Elapsed.TotalMilliseconds<250)Encode(); }
+                        gpu.ResetWallTiming();var watch=Stopwatch.StartNew();Encode();
                         double wall=watch.Elapsed.TotalMilliseconds;
                         if(run==0)
                         {

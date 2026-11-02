@@ -11,6 +11,7 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
+if (command == "compare-mlx-kernels") { KernelComparisonBenchmarks.Run(File.ReadAllText(kernelFile), Option("--family") ?? "all", int.Parse(Option("--runs") ?? "9")); return; }
 if (command == "profile-experts") { ExpertThroughputTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "3")); return; }
 if (command == "kv-storage-self-test") { KvStorageTests.Run(File.ReadAllText(kernelFile)); return; }
 if (command == "tensorops-self-test") { TensorOpsSelfTest.Run(File.ReadAllText(kernelFile), Option("--precision") ?? "fp32", args.Contains("--optimized-projections"), int.Parse(Option("--expert-tile-rows") ?? "16"), args.Contains("--predecoded-projections"), args.Contains("--predecoded-experts"), args.Contains("--gathered-experts"), args.Contains("--adaptive-expert-tiles")); return; }

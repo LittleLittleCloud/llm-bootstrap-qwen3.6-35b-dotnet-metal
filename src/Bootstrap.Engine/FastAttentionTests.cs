@@ -5,13 +5,13 @@ namespace Bootstrap.Engine;
 
 internal static class FastAttentionTests
 {
-    public static void Run(string source, int repeats, bool tiles = false, bool halfKv = false)
+    public static void Run(string source, int repeats, bool tiles = false, bool halfKv = false, bool comparison = false)
     {
         if (repeats < 1) throw new ArgumentOutOfRangeException(nameof(repeats));
         using var gpu = new Metal(source);
         CheckCausalSoftmax(gpu);
         using var deviceAttention = new DeviceAttentionWorkspace(gpu);
-        foreach (var (history, rows) in new[] { (0, 1), (17, 7), (0, 512), (1024, 512), (10520, 190), (32768, 63), (10520, 512), (10520, 2048), (30000, 2048) })
+        foreach (var (history, rows) in (comparison ? new[] { (0, 512), (0, 2048), (8192, 2048), (10520, 190), (32768, 63), (30000, 2048) } : new[] { (0, 1), (17, 7), (0, 512), (1024, 512), (10520, 190), (32768, 63), (10520, 512), (10520, 2048), (30000, 2048) }))
         {
             int length = history + rows;
             using var q = gpu.Allocate((ulong)rows * 4096 * 4);
@@ -30,7 +30,7 @@ internal static class FastAttentionTests
             var p = new KernelArgs { M = (uint)rows, Position = (uint)history, K = (uint)length, Flags = halfKv ? 256u : 0u };
             var softmax = p; softmax.Position = (uint)(length - 1);
             deviceAttention.Prepare(rows, length, halfKv);
-            foreach (string mode in (halfKv ? new[] { "legacy", "tiled", "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal", "fused-fp16", "fused-fp16-128" } : tiles ? new[] { "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal" } : new[] { "tiled", "fp16", "fused-fp16", "fused-fp16-128" }))
+            foreach (string mode in (comparison ? new[] { "fp16-device-causal" } : halfKv ? new[] { "legacy", "tiled", "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal", "fused-fp16", "fused-fp16-128" } : tiles ? new[] { "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal" } : new[] { "tiled", "fp16", "fused-fp16", "fused-fp16-128" }))
             {
                 void Encode(GpuBuffer input, GpuBuffer destination)
                 {
@@ -63,6 +63,7 @@ internal static class FastAttentionTests
                 gpu.Begin(); Encode(alias, alias); gpu.End();
                 if (!alias.Values<float>(rows * 4096).SequenceEqual(output.Values<float>(rows * 4096)))
                     throw new Exception($"Attention in-place alias mismatch: {mode}/{history}/{rows}");
+                if (comparison) { var warm = Stopwatch.StartNew(); while (warm.Elapsed.TotalMilliseconds < 250) { gpu.Begin(); Encode(q, output); gpu.End(); } }
                 for (int run = 0; run < repeats; run++)
                 {
                     gpu.ResetWallTiming(); var watch = Stopwatch.StartNew();

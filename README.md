@@ -623,3 +623,14 @@ merged with the unchanged predecessor OOM report. That revision scored 1245.3
 prefill tok/s, conformance 10/10, needle 10/10 and cache correctness 18/18, with
 no OOM. Its report predates the optimizations in this section; it does not
 validate their full evaluation performance.
+
+## Comparison with MLX kernels
+
+[The paired MLX 0.32.4 comparison](docs/MLX_KERNEL_COMPARISON.md) measures matched
+synthetic dense, routed-expert and causal-attention workloads on the M5 Pro.
+Long-context attention shows the largest per-operation gap (2.4–3.1x); dense
+FP16 matmul has no comparable deficit. Quantized expert cores differ by
+1.24–1.60x, shrinking to 1.12–1.28x when input packing is included. The report
+separates equal-weight FP16 controls from affine-8 requantization, documents
+rounding/timing differences, and provides reproduction commands. These
+microbenchmarks are not an end-to-end evaluation.
