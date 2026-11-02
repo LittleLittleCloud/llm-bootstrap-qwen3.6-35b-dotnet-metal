@@ -200,16 +200,31 @@ int boot_end(void *handle) { @autoreleasepool {
             // not raw mach_absolute_time ticks. Validate against command GPU time.
             double seconds_per_tick=double(cpu1-cpu0)*1e-9/double(gpu1-gpu0);
             double sampled_seconds=0;
+            std::vector<std::pair<uint64_t,uint64_t>> intervals;
             const auto *values=(const MTLCounterResultTimestamp*)data.bytes;
             for(size_t i=0;i<c->sample_kinds.size();++i){
                 uint64_t start=values[i*2].timestamp,end=values[i*2+1].timestamp;
                 if(start==MTLCounterErrorValue || end==MTLCounterErrorValue || end<start){c->error="Invalid GPU timestamp sample";ok=false;break;}
+                intervals.emplace_back(start,end);
                 double seconds=(end-start)*seconds_per_tick;sampled_seconds+=seconds;
                 int kind=c->sample_kinds[i];if(kind>=0){c->attention[kind]+=seconds;c->attention[3+kind]++;}
                 auto &kernel=c->kernel_wall[c->sample_names[i]];kernel.first+=seconds;kernel.second++;
             }
             double command_seconds=c->command.GPUEndTime-c->command.GPUStartTime;
-            if(sampled_seconds>command_seconds*1.05+1e-5){c->error="Counter times exceed command-buffer GPU duration; check clock calibration";ok=false;}
+            // Encoder timestamp intervals can overlap. Validate their span rather
+            // than their sum; summing overlap is not a command-buffer duration.
+            if(ok && !intervals.empty()) {
+                std::sort(intervals.begin(),intervals.end());
+                uint64_t first=intervals.front().first,last=intervals.front().second;
+                uint64_t union_start=first,union_end=last,union_ticks=0;size_t overlaps=0;
+                for(size_t i=1;i<intervals.size();++i){auto [start,end]=intervals[i];last=std::max(last,end);
+                    if(start<union_end){overlaps++;union_end=std::max(union_end,end);}
+                    else {union_ticks+=union_end-union_start;union_start=start;union_end=end;}}
+                union_ticks+=union_end-union_start;
+                double span_seconds=(last-first)*seconds_per_tick;
+                fprintf(stderr,"PROFILE_COUNTER command_ms=%.6f sampled_ms=%.6f span_ms=%.6f union_ms=%.6f overlapping_intervals=%zu scale=%.12g samples=%zu\n",command_seconds*1000,sampled_seconds*1000,span_seconds*1000,union_ticks*seconds_per_tick*1000,overlaps,seconds_per_tick,intervals.size());
+                if(first<gpu0 || last>gpu1 || span_seconds>command_seconds*1.05+1e-5){c->error="Counter span exceeds command-buffer GPU duration or calibration bounds";ok=false;}
+            }
         }
         c->wall[6]+=wall_now()-completed;
     }
