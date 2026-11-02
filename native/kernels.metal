@@ -1129,3 +1129,74 @@ kernel void attention_softmax_half_causal(device float*x [[buffer(0)]],device ha
     sum=simd_sum(tid<8?partial[tid]:0);if(tid==0)denominator=sum;threadgroup_barrier(mem_flags::mem_threadgroup);
     for(uint i=tid;i<end;i+=256)y[head*p.k+i]=i<valid?half(x[head*p.k+i]/denominator):half(0);
 }
+
+// Online attention: grouped queries are staged once, while QK, softmax and AV
+// remain inside a threadgroup. G adjacent query heads share one KV head.
+kernel void attention_query_grouped_half(device const float*x [[buffer(0)]],device half*y [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    uint at=i*4;if(at>=p.m*4096)return;
+    uint d=at%256,logical=at/256,block=logical/(p.m*p.a),local=logical%(p.m*p.a);
+    uint row=local/p.a,head=block*p.a+local%p.a;
+    *((device half4*)(y+at))=half4(*((device const float4*)(x+(row*16+head)*256+d)));
+}
+
+// Reuse each FP32 score row for FP16 probabilities after its reduction.
+// The unused second half holds rescaling and denominator values.
+template<int BQ,int BK,int SG,int G,bool Interior=false>
+inline void attention_online_reuse(device half*q,device half*k,device half*v,device const float*gate,device float*y,constant P&p,uint tid,uint lane,uint sid,uint3 group,threadgroup float*score) {
+    threadgroup half*prob=(threadgroup half*)score;
+    float maxima[BQ/SG],denoms[BQ/SG];
+    uint first=group.x*BQ,headGroup=group.y,kvHead=headGroup*G/8;
+    if(first>=p.m*G)return;
+    constexpr auto qdesc=matmul2d_descriptor(BQ,BK,256,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    constexpr auto vdesc=matmul2d_descriptor(BQ,256,BK,false,false,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<qdesc,execution_simdgroups<SG>> qop;
+    matmul2d<vdesc,execution_simdgroups<SG>> vop;
+    auto queries=tensor(q+headGroup*p.m*G*256,dextents<int,2>{256,int(p.m*G)},array<int,2>{1,256});
+    auto keys=tensor(k+kvHead*256,dextents<int,2>{256,int(p.k)},array<int,2>{1,512});
+    auto values=tensor(v+kvHead*256,dextents<int,2>{256,int(p.k)},array<int,2>{1,512});
+    auto qleft=queries.slice(0,int(first));auto kright=keys.slice(0,0);
+    auto probabilities=tensor(prob,extents<int,BK,BQ>{},array<int,2>{1,BK*2});
+    auto vright=values.slice(0,0);
+    auto out=vop.template get_destination_cooperative_tensor<decltype(probabilities),decltype(vright),float>();
+    for(uint i=0;i<out.get_capacity();++i)out[i]=0;
+    for(uint i=0;i<BQ/SG;++i){maxima[i]=-INFINITY;denoms[i]=0;}
+    uint end=min(p.k,p.pos+(min(p.m*G,first+BQ)+G-1)/G);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint key=0;key<end;key+=BK){
+        auto right=keys.slice(0,int(key));
+        auto scores=qop.template get_destination_cooperative_tensor<decltype(qleft),decltype(right),float>();
+        for(uint i=0;i<scores.get_capacity();++i)scores[i]=0;
+        if constexpr(Interior){
+            if(first+BQ<=p.m*G&&key+BK<=p.k){auto a=queries.template slice<256,BQ>(0,int(first));auto b=keys.template slice<256,BK>(0,int(key));qop.run(a,b,scores);}
+            else qop.run(qleft,right,scores);
+        }else qop.run(qleft,right,scores);
+        auto shared=tensor(score,extents<int,BK,BQ>{},array<int,2>{1,BK});scores.store(shared);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for(uint ir=0;ir<BQ/SG;++ir){
+            uint r=sid+ir*SG;
+            uint logical=first+r,row=logical/G;float vals[BK/32],top=-INFINITY;
+            for(uint j=0;j<BK/32;++j){uint t=key+lane+j*32;float a=(row<p.m&&t<p.k&&t<=p.pos+row)?score[r*BK+lane+j*32]*(1.0f/16.0f):-INFINITY;vals[j]=a;top=max(top,a);}
+            float next=max(maxima[ir],simd_max(top));
+            float decay=row<p.m?exp(maxima[ir]-next):1.0f,total=0;
+            for(uint j=0;j<BK/32;++j){float value=row<p.m?exp(vals[j]-next):0.0f;prob[r*(BK*2)+lane+j*32]=half(value);total+=value;}
+            total=simd_sum(total);
+            denoms[ir]=denoms[ir]*decay+total;maxima[ir]=next;
+            if(lane==0){score[r*BK+BK/2]=decay;score[r*BK+BK/2+1]=denoms[ir];}
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for(uint i=0;i<out.get_capacity();++i){auto c=out.get_multidimensional_index(i);if(c[1]<BQ&&c[0]<256)out[i]*=score[c[1]*BK+BK/2];}
+        auto rightValues=values.slice(0,int(key));
+        if constexpr(Interior){if(key+BK<=p.k){auto b=values.template slice<256,BK>(0,int(key));vop.run(probabilities,b,out);}else vop.run(probabilities,rightValues,out);}
+        else vop.run(probabilities,rightValues,out);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for(uint i=0;i<out.get_capacity();++i){auto c=out.get_multidimensional_index(i);uint logical=first+c[1],row=logical/G,head=headGroup*G+logical%G;
+        if(c[1]<BQ&&c[0]<256&&row<p.m){uint at=(row*16+head)*256+c[0];y[at]=out[i]/score[c[1]*BK+BK/2+1]*sigmoid(gate[at]);}}
+}
+
+#define ONLINE_REUSE(BQ,BK,SG,G) \
+kernel void attention_online_q##BQ##_k##BK##_s##SG##_g##G##_r1(device half*q [[buffer(0)]],device half*k [[buffer(1)]],device half*v [[buffer(2)]],device const float*gate [[buffer(3)]],device float*y [[buffer(4)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint lane [[thread_index_in_simdgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) { \
+    threadgroup float score[BQ*BK];attention_online_reuse<BQ,BK,SG,G,true>(q,k,v,gate,y,p,tid,lane,sid,group,score); }
+ONLINE_REUSE(32,256,8,1)
+ONLINE_REUSE(32,256,8,8)
+#undef ONLINE_REUSE

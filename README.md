@@ -23,7 +23,9 @@ previous storage for comparison. The default served window is the checkpoint's
 native 262144 tokens. `--context-window` can select a smaller window (1–262144).
 KV storage starts at at most 4096 tokens and grows as positions are consumed;
 requesting a large output allowance does not reserve that whole allowance in memory.
-Prefill attention uses a 128 MiB score workspace and smaller tiles at long positions.
+The general prefill workspace reserves 128 MiB for attention scores; tuned online
+attention keeps its scores inside the threadgroup, with a device-workspace
+fallback for fewer than 32 queries.
 Vision and the target MTP head are excluded. Optional DFlash2 speculation is described below. Greedy text generation has thinking
 disabled. No OS memory/power limits are modified. All model files are external
 to Git and are checked against the manifest.
@@ -634,3 +636,13 @@ FP16 matmul has no comparable deficit. Quantized expert cores differ by
 separates equal-weight FP16 controls from affine-8 requantization, documents
 rounding/timing differences, and provides reproduction commands. These
 microbenchmarks are not an end-to-end evaluation.
+
+## Fused online attention
+
+`--tuned-prefill` now selects `--attention-mode fp16-online`: fused QK, online
+softmax and AV, with 32 logical query rows × 256 KV rows and grouped KV reuse.
+Long-context attention improves 2.26–3.13x; a paired 10,520-token full-model
+check improves 1548.73→1678.54 tok/s (+8.4%). Short batches retain the previous
+causal kernel. [Implementation, tuning, dedicated benchmarks and validation](docs/ONLINE_ATTENTION.md)
+document the selected path and precision differences. These development
+results do not replace the existing formal evaluation of the predecessor.

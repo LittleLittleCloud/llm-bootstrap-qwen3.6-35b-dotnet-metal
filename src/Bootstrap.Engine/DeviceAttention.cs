@@ -10,12 +10,12 @@ internal sealed class DeviceAttentionWorkspace(Metal gpu) : IDisposable
         if (buffer is not null && buffer.Length >= bytes) return;
         buffer?.Dispose(); buffer = gpu.Allocate(bytes);
     }
-    public void Prepare(int rows, int length, bool halfKv = false)
+    public void Prepare(int rows, int length, bool halfKv = false, bool online = false)
     {
         Ensure(ref query, (ulong)rows * 4096 * 2);
         if (!halfKv) { Ensure(ref key, (ulong)length * 512 * 2); Ensure(ref value, (ulong)length * 512 * 2); }
         else { key?.Dispose(); value?.Dispose(); key = value = null; }
-        Ensure(ref probability, Math.Min((ulong)rows * 16 * (ulong)length, ContextLimits.AttentionWorkspaceFloats) * 2);
+        if (!online || rows < 32) Ensure(ref probability, Math.Min((ulong)rows * 16 * (ulong)length, ContextLimits.AttentionWorkspaceFloats) * 2);
     }
     public void Encode(GpuBuffer q, GpuBuffer k, GpuBuffer v, GpuBuffer gate, GpuBuffer scores, GpuBuffer output, int rows, int position, bool halfKv = false, bool causal = false)
     {
@@ -42,6 +42,24 @@ internal sealed class DeviceAttentionWorkspace(Metal gpu) : IDisposable
             }
             gpu.Dispatch2D(causal ? "attention_values_device_causal" : "attention_values_device", p, 4 * 128, (uint)((count + 15) / 16) * 16, 128, probability!, cachedValue, g, result);
         }
+    }
+    // Group eight adjacent query heads around their shared KV head. Below 32
+    // queries the measured causal device path is faster than the fused kernel.
+    public const int OnlineGroupHeads = 8;
+    public void EncodeOnline(GpuBuffer q, GpuBuffer k, GpuBuffer v, GpuBuffer gate, GpuBuffer scores, GpuBuffer output, int rows, int position, bool halfKv = false)
+    {
+        if (rows < 32) { Encode(q, k, v, gate, scores, output, rows, position, halfKv, causal: true); return; }
+        int length = position + rows, heads = OnlineGroupHeads;
+        var p = new KernelArgs { M = (uint)rows, K = (uint)length, Position = (uint)position, A = (uint)heads };
+        gpu.Dispatch("attention_query_grouped_half", p, (uint)rows * 1024, 128, q, query!);
+        if (!halfKv)
+        {
+            var convert = new KernelArgs { N = (uint)length * 512 };
+            gpu.Dispatch("attention_input_half", convert, (uint)length * 128, 128, k, key!);
+            gpu.Dispatch("attention_input_half", convert, (uint)length * 128, 128, v, value!);
+        }
+        gpu.Dispatch2D($"attention_online_q32_k256_s8_g{heads}_r1", p, (uint)((rows * heads + 31) / 32) * 256, (uint)(16 / heads), 256,
+            query!, halfKv ? k : key!, halfKv ? v : value!, gate, output);
     }
     public void Dispose() { query?.Dispose(); key?.Dispose(); value?.Dispose(); probability?.Dispose(); }
 }

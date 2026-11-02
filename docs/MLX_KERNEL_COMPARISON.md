@@ -1,5 +1,8 @@
 # MLX kernel comparison — 2026-11-02
 
+This report describes the pre-online-attention implementation. See the
+[new fused attention measurements](ONLINE_ATTENTION.md) for the subsequent change.
+
 The largest measured per-operation gap is long-context attention: MLX is
 2.4–3.1x faster for 2048 new queries with 8K–30K history. Dense FP16 matmul does
 not show a comparable deficit. MLX affine-8 expert matmul is faster than our

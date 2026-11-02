@@ -12,11 +12,14 @@ internal sealed partial class QwenEngine
 
     // Alternate configuration order; warm timings exclude model load and tokenization.
     public void ComparePrefillVariants(string prompt, int runs, string expectedAnswer, bool fast = false,
-        bool projections = false, bool batches = false, bool tuned = false, bool experts = false, bool final = false, bool throughput = false)
+        bool projections = false, bool batches = false, bool tuned = false, bool experts = false, bool final = false, bool throughput = false, bool online = false)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
-        if (new[] { fast, projections, batches, tuned, experts, final, throughput }.Count(x => x) > 1) throw new ArgumentException("Select one comparison family");
-        PrefillVariant[] variants = throughput ? [
+        if (new[] { fast, projections, batches, tuned, experts, final, throughput, online }.Count(x => x) > 1) throw new ArgumentException("Select one comparison family");
+        PrefillVariant[] variants = online ? [
+            new("gathered_causal_adaptive", "fp16", "fp16-device", true, true, 2048, 64, true, false, true, true, true),
+            new("online_gqa", "fp16", "fp16-online", true, true, 2048, 64, true, false, true, true, true)
+        ] : throughput ? [
             new("baseline_fp16_kv", "fp16", "fp16-device", true, true, 2048, 64, true),
             new("gathered_causal", "fp16", "fp16-device", true, true, 2048, 64, true, false, true, true),
             new("gathered_causal_adaptive", "fp16", "fp16-device", true, true, 2048, 64, true, false, true, true, true)
@@ -74,7 +77,7 @@ internal sealed partial class QwenEngine
         {
             Configure(variant);
             var result = Generate(smoke, 1, false);
-            if (throughput && result.Text.Trim() != "4") throw new Exception($"{variant.Name} failed arithmetic smoke");
+            if ((throughput || online) && result.Text.Trim() != "4") throw new Exception($"{variant.Name} failed arithmetic smoke");
             var current = logits.Values<float>(Vocabulary).ToArray(); reference ??= current;
             double squaredError = 0, squaredReference = 0, maxError = 0;
             for (int i = 0; i < Vocabulary; i++)
@@ -102,7 +105,7 @@ internal sealed partial class QwenEngine
                 var cpu = process.TotalProcessorTime; var timer = Stopwatch.StartNew();
                 var result = Generate(tokens, run == 0 ? 32 : 1, run != 0);
                 double wall = timer.Elapsed.TotalMilliseconds, cpuMs = (process.TotalProcessorTime - cpu).TotalMilliseconds;
-                if (throughput && run == 0 && result.Text.Trim() != expectedAnswer) throw new Exception($"{variant.Name} failed full needle answer");
+                if ((throughput || online) && run == 0 && result.Text.Trim() != expectedAnswer) throw new Exception($"{variant.Name} failed full needle answer");
                 int first = result.Tokens[0]; string name = Name(variant);
                 if (run == 0) firstTokens.Add(name, first);
                 if (first != firstTokens[name]) throw new Exception($"{name} changed first token across repeated runs");

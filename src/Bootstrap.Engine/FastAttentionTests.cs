@@ -30,11 +30,12 @@ internal static class FastAttentionTests
             var p = new KernelArgs { M = (uint)rows, Position = (uint)history, K = (uint)length, Flags = halfKv ? 256u : 0u };
             var softmax = p; softmax.Position = (uint)(length - 1);
             deviceAttention.Prepare(rows, length, halfKv);
-            foreach (string mode in (comparison ? new[] { "fp16-device-causal" } : halfKv ? new[] { "legacy", "tiled", "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal", "fused-fp16", "fused-fp16-128" } : tiles ? new[] { "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal" } : new[] { "tiled", "fp16", "fused-fp16", "fused-fp16-128" }))
+            foreach (string mode in (comparison ? new[] { "fp16-device-causal" } : halfKv ? new[] { "legacy", "tiled", "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal", "fp16-online", "fused-fp16", "fused-fp16-128" } : tiles ? new[] { "fp16", "fp16_opt64", "fp16-device", "fp16-device-causal", "fp16-online" } : new[] { "tiled", "fp16", "fused-fp16", "fused-fp16-128" }))
             {
                 void Encode(GpuBuffer input, GpuBuffer destination)
                 {
-                    if (mode.StartsWith("fp16-device")) deviceAttention.Encode(input, cacheK, cacheV, gate, scores, destination, rows, history, halfKv, mode == "fp16-device-causal");
+                    if (mode == "fp16-online") deviceAttention.EncodeOnline(input, cacheK, cacheV, gate, scores, destination, rows, history, halfKv);
+                    else if (mode.StartsWith("fp16-device")) deviceAttention.Encode(input, cacheK, cacheV, gate, scores, destination, rows, history, halfKv, mode == "fp16-device-causal");
                     else if (mode.StartsWith("fused")) gpu.Dispatch2D(mode.EndsWith("128") ? "batch_attention_fused_fp16_bk128" : "batch_attention_fused_fp16", p, (uint)((rows + 15) / 16) * 128, 16, 128, input, cacheK, cacheV, gate, destination);
                     else
                     {
@@ -107,7 +108,7 @@ internal static class FastAttentionTests
         }
         Console.WriteLine(JsonSerializer.Serialize(new { type = "causal_softmax_self_test", checks, masked_inputs = "NaN", unused_outputs = "NaN guards preserved" }));
     }
-    static void Fill(GpuBuffer buffer, int count, uint seed, float scale)
+    internal static void Fill(GpuBuffer buffer, int count, uint seed, float scale)
     {
         var data = buffer.Values<float>(count);
         for (int i = 0; i < count; i++)
@@ -132,7 +133,7 @@ internal static class FastAttentionTests
             foreach (int d in new[] { 0, 127, 255 })
             {
                 double expected = 0;
-                if (!mode.StartsWith("fused"))
+                if (!mode.StartsWith("fused") && !(mode == "fp16-online" && rows >= 32))
                 {
                     for (int t = 0; t < logits.Length; t++)
                     {
@@ -144,7 +145,7 @@ internal static class FastAttentionTests
                 else
                 {
                     double runningMax = double.NegativeInfinity, denominator = 0;
-                    int blockSize = mode.EndsWith("128") ? 128 : 64;
+                    int blockSize = mode == "fp16-online" ? 256 : mode.EndsWith("128") ? 128 : 64;
                     for (int start = 0; start < logits.Length; start += blockSize)
                     {
                         int end = Math.Min(start + blockSize, logits.Length);
