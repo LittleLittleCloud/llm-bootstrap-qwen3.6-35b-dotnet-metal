@@ -6,7 +6,7 @@ namespace Bootstrap.Engine;
 // reference. It does not load a model or contribute leaderboard measurements.
 internal static class ExpertThroughputTests
 {
-    public static void Run(string source, int runs, bool comparison = false, bool layouts = false)
+    public static void Run(string source, int runs, bool comparison = false, bool layouts = false, bool reverse = false)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
         var variants = layouts ? new[] { ("staged", true, true), ("pipeline", true, true), ("layout1", true, true), ("layout1_pipeline", true, true), ("layout2", true, true), ("layout2_pipeline", true, true) } : comparison ? new[] { ("adaptive", true, true), ("adaptive_core", true, true), ("fp16_predecoded", true, false) } : new[] { ("baseline", false, false), ("gathered", true, false), ("adaptive", true, true), ("staged", true, true), ("pipeline", true, true), ("staged64", true, true), ("staged128", true, true) };
@@ -46,7 +46,7 @@ internal static class ExpertThroughputTests
                 var pack=new KernelArgs{M=(uint)m,K=(uint)k,Kind=k==512?2u:0u};
                 gpu.Begin();gpu.Dispatch("expert_input_half",pack,(uint)(m*k/4),128,x,tokens,packedX);gpu.End();
                 float[]? reference=null;
-                foreach(var (name,packed,adaptive) in variants)
+                foreach(var (name,packed,adaptive) in reverse ? variants.Reverse() : variants)
                 {
                     bool staged = name.StartsWith("staged") || name == "pipeline" || name.StartsWith("layout");
                     int layout=name.StartsWith("layout1")?1:name.StartsWith("layout2")?2:0;

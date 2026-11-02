@@ -1381,3 +1381,23 @@ kernel void delta_scan(device const float*q [[buffer(0)]],device const float*k [
 template [[host_name("delta_direct8")]] kernel decltype(delta_scan<16,false>) delta_scan<16,false>;
 template [[host_name("delta_staged8")]] kernel decltype(delta_scan<8,true>) delta_scan<8,true>;
 template [[host_name("delta_staged16")]] kernel decltype(delta_scan<16,true>) delta_scan<16,true>;
+
+// Development sweep: direct device FP16 operands and FP32 accumulation/output.
+template<int Rows,int Cols,int Groups>
+kernel void dense_tile(device half*x [[buffer(0)]],device half*w [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint3 group [[threadgroup_position_in_grid]]) {
+    constexpr auto desc=matmul2d_descriptor(Rows,Cols,dynamic_extent,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<Groups>> op;
+    auto left=tensor(x,dextents<int,2>{int(p.k),int(p.m)},array<int,2>{1,int(p.k)});
+    auto right=tensor(w,dextents<int,2>{int(p.k),int(p.n)},array<int,2>{1,int(p.k)});
+    auto output=tensor(y,dextents<int,2>{int(p.n),int(p.m)},array<int,2>{1,int(p.n)});
+    auto a=left.slice(0,int(group.y)*Rows);auto b=right.slice(0,int(group.x)*Cols);auto c=output.slice(int(group.x)*Cols,int(group.y)*Rows);
+    auto acc=op.template get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    op.run(a,b,acc);acc.store(c);
+}
+template [[host_name("dense_m32_n64_s1")]] kernel decltype(dense_tile<32,64,1>) dense_tile<32,64,1>;
+template [[host_name("dense_m64_n64_s2")]] kernel decltype(dense_tile<64,64,2>) dense_tile<64,64,2>;
+template [[host_name("dense_m64_n64_s4")]] kernel decltype(dense_tile<64,64,4>) dense_tile<64,64,4>;
+template [[host_name("dense_m128_n64_s4")]] kernel decltype(dense_tile<128,64,4>) dense_tile<128,64,4>;
+template [[host_name("dense_m64_n128_s4")]] kernel decltype(dense_tile<64,128,4>) dense_tile<64,128,4>;
+template [[host_name("dense_m128_n128_s4")]] kernel decltype(dense_tile<128,128,4>) dense_tile<128,128,4>;

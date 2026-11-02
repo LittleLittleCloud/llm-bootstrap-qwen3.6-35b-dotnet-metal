@@ -3,10 +3,11 @@ using System.Text.Json;
 namespace Bootstrap.Engine;
 internal static class ExpertFusionTests
 {
-    public static void Run(string source, int runs)
+    public static void Run(string source, int runs, bool layouts = false)
     {
         using var gpu=new Metal(source);
         const int k=2048,n=512,experts=256,scales=n/128*(k/128),slot=n*k+scales*2;
+        using var repacked=layouts?gpu.Allocate((ulong)experts*2*slot):null;
         using var raw=gpu.Allocate((ulong)experts*2*slot);using var descriptors=gpu.Allocate(experts*48);
         for(int e=0;e<experts;e++)for(int choice=0;choice<2;choice++){
             ulong off=(ulong)((e*2+choice)*slot);var desc=descriptors.Values<ulong>(experts*6);
@@ -30,7 +31,7 @@ internal static class ExpertFusionTests
             void Encode(string variant,int nt){
                 bool old=variant=="baseline";var p=new KernelArgs{M=(uint)rows,N=n,K=k,Flags=1};
                 gpu.Begin();
-                if(variant.StartsWith("fused"))gpu.Dispatch2D(variant=="fused_pipeline"?"expert_gate_up_pipeline":"expert_gate_up_staged"+variant[5..],p,n/32*64,(uint)(nt+1),64,packed,raw,descriptors,tiles,tileCount,output);
+                if(variant.StartsWith("fused"))gpu.Dispatch2D(variant.StartsWith("fused_layout")?"expert_gate_up_"+variant[6..]:variant=="fused_pipeline"?"expert_gate_up_pipeline":"expert_gate_up_staged"+variant[5..],p,n/32*64,(uint)(nt+1),64,packed,variant.StartsWith("fused_layout")?repacked!:raw,descriptors,tiles,tileCount,output);
                 else{
                     string kernel=old?"expert_matrix_gathered":"expert_matrix_staged";uint threads=old?128u:64u;
                     gpu.Dispatch2D(kernel,p,n/64*threads,(uint)(nt+1),threads,packed,raw,descriptors,tiles,tileCount,gate);
@@ -40,7 +41,13 @@ internal static class ExpertFusionTests
                 }
                 gpu.End();
             }
-            foreach(string variant in new[]{"baseline","staged","fused","fused_pipeline","fused64","fused128"}){
+            foreach(string variant in layouts ? new[]{"baseline","fused","fused_layout1","fused_layout1_pipeline","fused_layout2","fused_layout2_pipeline"} : new[]{"baseline","staged","fused","fused_pipeline","fused64","fused128"}){
+                if(variant.StartsWith("fused_layout")) {
+                    raw.Values<byte>(checked((int)raw.Length)).CopyTo(repacked!.Values<byte>(checked((int)raw.Length)));
+                    for(uint choice=0;choice<2;choice++){
+                        gpu.Begin();gpu.Dispatch("expert_repack_bytes",new(){N=n,K=k,A=256,Kind=choice,Flags=variant.StartsWith("fused_layout1")?1u:2u},experts*n*k,256,raw,descriptors,repacked);gpu.End();
+                    }
+                }
                 int nt=Setup(variant=="baseline"?64:32);output.Values<Half>(rows*n+1).Fill(Half.NaN);baseline.Values<Half>(rows*n+1)[rows*n]=Half.NaN;
                 Encode(variant,nt);
                 if(variant=="baseline"){
@@ -60,6 +67,7 @@ internal static class ExpertFusionTests
                     if(!Half.IsNaN(output.Values<Half>(rows*n+1)[rows*n]))throw new Exception("Fusion guard overwritten");
                     Console.WriteLine(JsonSerializer.Serialize(new{type="fusion_check",variant,m,skew,max_abs_error=max,rmse=Math.Sqrt(sum/(rows*n))}));
                 }
+                if(layouts){var warm=Stopwatch.StartNew();while(warm.ElapsedMilliseconds<250)Encode(variant,nt);}
                 for(int run=0;run<runs;run++){gpu.ResetWallTiming();var watch=Stopwatch.StartNew();Encode(variant,nt);double wall=watch.Elapsed.TotalMilliseconds;Console.WriteLine(JsonSerializer.Serialize(new{type="fusion_benchmark",variant,m,skew,run,wall_ms=wall,timing=gpu.ReadWallTiming()}));}
             }
         }
