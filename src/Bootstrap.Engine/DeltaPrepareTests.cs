@@ -110,7 +110,7 @@ internal static class DeltaPrepareTests
                     if (!float.IsNaN(buffer.Values<float>(expected.Length + 1)[expected.Length])) throw new Exception(name + " guard overwritten");
                 }
                 Equal(q, rq, "q"); Equal(k, rk, "k"); Equal(gates, rg, "gates"); Equal(carry, rc, "carry"); Equal(recurrent, rr, "recurrent"); Equal(output, ro, "output");
-                for (int t = 0; t < m; t++) for (int c = 4096; c < 8192; c++) if (v.Values<float>(m * 8192)[t * 8192 + c] != rv[t * 8192 + c]) throw new Exception("V mismatch");
+                for (int t = 0; t < m; t++) for (int c = 4096; c < 8192; c++) if (BitConverter.SingleToUInt32Bits(v.Values<float>(m * 8192)[t * 8192 + c]) != BitConverter.SingleToUInt32Bits(rv[t * 8192 + c])) throw new Exception("V bitwise mismatch");
                 if (!float.IsNaN(v.Values<float>(m * 8192 + 1)[m * 8192])) throw new Exception("V guard overwritten");
                 Console.WriteLine(JsonSerializer.Serialize(new { type = "delta_prepare_check", variant, m, split, bitwise = true, cpu_reference = true }));
             }
