@@ -18,6 +18,9 @@ internal static class PackedExpertTests
             {
                 Checkpoint.RepackExpert(mapped.Values<byte>(original.Length), 32, 128);
                 CheckBytes(original, mapped.Values<byte>(original.Length), 32, 128); checks++;
+                using var observed = gpu.Allocate((ulong)original.Length);
+                gpu.Begin(); gpu.Dispatch("copy_floats", new() { N = (uint)original.Length / 4 }, (uint)original.Length / 4, 128, mapped, observed); gpu.End();
+                Equal(mapped, observed, original.Length); checks++;
             }
             if (!SHA256.HashData(original).SequenceEqual(SHA256.HashData(File.ReadAllBytes(file)))) throw new Exception("Checkpoint file changed");
             checks++;
