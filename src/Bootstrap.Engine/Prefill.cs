@@ -18,7 +18,8 @@ internal sealed partial class QwenEngine
         if (tensor.Dtype != "BF16") throw new InvalidDataException("Unsupported norm weight precision");
         var b = batch!; b.PackedInputs ??= Buffer(b.Capacity * 8192 / 2);
         if ((ulong)dimension * heads * 2 > b.PackedInputs.Length) throw new ArgumentException("Normalization exceeds packed scratch workspace");
-        gpu.Dispatch("rmsnorm_pack", new() { N = dimension, M = heads, Epsilon = 1e-6f, Flags = (offset ? 1u : 0u) | (gate is not null ? 2u : 0u) | (residual is not null ? 4u : 0u) }, heads * 256, 256, input, tensor.Binding, output, gate ?? dummy, b.PackedInputs, residual ?? dummy);
+        uint threads = dimension == 128 ? 128u : 256u;
+        gpu.Dispatch("rmsnorm_pack", new() { N = dimension, M = heads, Epsilon = 1e-6f, Flags = (offset ? 1u : 0u) | (gate is not null ? 2u : 0u) | (residual is not null ? 4u : 0u) }, heads * threads, threads, input, tensor.Binding, output, gate ?? dummy, b.PackedInputs, residual ?? dummy);
     }
     string densePrefill = "baseline";
     public string DensePrefill

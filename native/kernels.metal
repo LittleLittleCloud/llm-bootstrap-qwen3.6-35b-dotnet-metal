@@ -56,14 +56,15 @@ kernel void rmsnorm(device const float*x [[buffer(0)]],device const ushort*w [[b
     for(uint j=tid;j<p.n;j+=256){float v=x[group*p.n+j]*inv*(bf(w[j])+((p.flags&1)?1.0f:0.0f));if(p.flags&2)v*=silu(gate[group*p.n+j]);y[group*p.n+j]=v;}
 }
 kernel void add(device const float*x [[buffer(0)]],device const float*z [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=x[i]+z[i];}
-// Same 256-thread reduction and expression order as rmsnorm. Optionally apply
+// Same reduction and expression order as rmsnorm; 128-wide rows omit only
+// the four all-zero SIMD groups. Optionally apply
 // the residual addition first, then emit the existing FP32 result and its FP16
 // projection operands together. Each row is owned by one threadgroup.
 kernel void rmsnorm_pack(device float*x [[buffer(0)]],device const ushort*w [[buffer(1)]],device float*y [[buffer(2)]],device const float*gate [[buffer(3)]],device half*packed [[buffer(4)]],device const float*residual [[buffer(5)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint group [[threadgroup_position_in_grid]]) {
     threadgroup float sums[8];threadgroup float inv;
     float total=0;for(uint j=tid;j<p.n;j+=256){uint at=group*p.n+j;float v=x[at];if(p.flags&4){v+=residual[at];x[at]=v;}total+=v*v;}
     total=simd_sum(total);if((tid&31)==0)sums[tid/32]=total;threadgroup_barrier(mem_flags::mem_threadgroup);
-    total=tid<8?sums[tid]:0;total=simd_sum(total);if(tid==0)inv=rsqrt(total/float(p.n)+p.eps);threadgroup_barrier(mem_flags::mem_threadgroup);
+    total=tid<(p.n==128?4u:8u)?sums[tid]:0;total=simd_sum(total);if(tid==0)inv=rsqrt(total/float(p.n)+p.eps);threadgroup_barrier(mem_flags::mem_threadgroup);
     for(uint j=tid;j<p.n;j+=256){uint at=group*p.n+j;float v=x[at]*inv*(bf(w[j])+((p.flags&1)?1.0f:0.0f));if(p.flags&2)v*=silu(gate[at]);y[at]=v;packed[at]=half(v);}
 }
 kernel void silu_product(device const float*x [[buffer(0)]],device const float*z [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=silu(x[i])*z[i];}

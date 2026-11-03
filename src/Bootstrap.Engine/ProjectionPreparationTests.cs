@@ -27,7 +27,7 @@ internal static class ProjectionPreparationTests
             {
                 initial.CopyTo(input.Values<float>(n));
                 gpu.Begin();
-                if (fused) { var f = p; if (add) f.Flags |= 4; gpu.Dispatch("rmsnorm_pack", f, (uint)heads * 256, 256, input, weights, alias ? input : output, gate, packed, residual); }
+                if (fused) { var f = p; if (add) f.Flags |= 4; gpu.Dispatch("rmsnorm_pack", f, (uint)heads * (dim == 128 ? 128u : 256u), dim == 128 ? 128u : 256u, input, weights, alias ? input : output, gate, packed, residual); }
                 else {
                     if (add) gpu.Dispatch("add", new() { N = (uint)n }, (uint)n, 128, input, residual, input);
                     gpu.Dispatch("rmsnorm", p, (uint)heads * 256, 256, input, weights, alias ? input : output, gate);
