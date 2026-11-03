@@ -16,6 +16,7 @@ if (args.Contains("--affine-cache") && (Option("--affine-cache") is not { } affi
 if (command == "convert-affine8") { AffineWeights.ConvertCheckpoint(Option("--model-dir") ?? throw new ArgumentException("--model-dir is required"), Option("--output-dir") ?? throw new ArgumentException("--output-dir is required"), manifestFile); return; }
 if (command == "affine8-self-test") { AffineTests.Run(File.ReadAllText(kernelFile)); return; }
 if (command == "profile-delta") { DeltaScanTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
+if (command == "profile-delta-prepare") { DeltaPrepareTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-dense-tiles") { DenseTileTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-online-attention") { OnlineAttentionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), Option("--case"), Option("--variants"), args.Contains("--stress"), Option("--kv-cache-precision") != "fp32"); return; }
 if (command == "compare-mlx-kernels") { KernelComparisonBenchmarks.Run(File.ReadAllText(kernelFile), Option("--family") ?? "all", int.Parse(Option("--runs") ?? "9")); return; }
@@ -49,6 +50,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.CausalDeviceAttention = tunedPrefill || args.Contains("--causal-attention");
         engine.GatheredExperts = args.Contains("--gathered-experts") || (tunedPrefill && !args.Contains("--predecoded-experts"));
         engine.DeltaMode = Option("--delta-mode") ?? "baseline";
+        engine.DeltaPreparation = Option("--delta-preparation") ?? (tunedPrefill ? "fused" : "baseline");
         engine.ValidateDelta = args.Contains("--validate-delta");
         engine.ExpertKernel = Option("--expert-kernel") ?? (tunedPrefill ? "fused" : "baseline");
         engine.ParallelExpertRouting = args.Contains("--parallel-expert-routing") || (tunedPrefill && !args.Contains("--serial-expert-routing"));
