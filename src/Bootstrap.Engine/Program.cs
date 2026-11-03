@@ -19,6 +19,7 @@ if (command == "profile-delta") { DeltaScanTests.Run(File.ReadAllText(kernelFile
 if (command == "profile-delta-prepare") { DeltaPrepareTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-dense-prefill") { DensePrefillTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--candidate-only")); return; }
 if (command == "profile-dense-tiles") { DenseTileTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
+if (command == "profile-projection-preparation") { ProjectionPreparationTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-mix") { MixTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-online-attention") { OnlineAttentionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), Option("--case"), Option("--variants"), args.Contains("--stress"), Option("--kv-cache-precision") != "fp32"); return; }
 if (command == "compare-mlx-kernels") { KernelComparisonBenchmarks.Run(File.ReadAllText(kernelFile), Option("--family") ?? "all", int.Parse(Option("--runs") ?? "9")); return; }
@@ -54,6 +55,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.DeltaMode = Option("--delta-mode") ?? "baseline";
         engine.DeltaPreparation = Option("--delta-preparation") ?? (tunedPrefill ? "fused" : "baseline");
         engine.DensePrefill = Option("--dense-prefill") ?? (tunedPrefill ? "all" : "baseline");
+        engine.ProjectionPreparation = Option("--projection-preparation") ?? (tunedPrefill ? "fused" : "baseline");
         engine.ValidateDelta = args.Contains("--validate-delta");
         engine.ExpertKernel = Option("--expert-kernel") ?? (tunedPrefill ? "fused" : "baseline");
         engine.ParallelExpertRouting = args.Contains("--parallel-expert-routing") || (tunedPrefill && !args.Contains("--serial-expert-routing"));
