@@ -209,6 +209,8 @@ internal sealed partial class QwenEngine
             BatchProject(prefix + ".mlp.gate", b.Norm, b.Router, count);
             gpu.Dispatch("batch_router", new() { K = (uint)count }, (uint)count * 32, 128, b.Router, b.Ids, b.Rates);
             bool stagedExperts = count > VerificationCapacity && GatheredExperts && TensorOpsPrecision == "fp16" && ExpertKernel != "baseline";
+            if (PackedExperts && count > VerificationCapacity && !(stagedExperts && ExpertKernel == "fused"))
+                throw new InvalidOperationException("Packed experts require the fused FP16 gathered prefill path");
             int tileRows = stagedExperts ? 32 : count > VerificationCapacity && OptimizedProjections && TensorOpsPrecision == "fp16" ? ExpertTileRows : 16;
             if (ParallelExpertRouting && count > VerificationCapacity)
                 gpu.Dispatch("expert_group_parallel", new() { M = (uint)count, A = (uint)tileRows }, 256, 256, b.Ids, b.Counts, b.Offsets, b.Tiles, b.TileCount, b.SortedTokens, b.Inverse);
@@ -243,7 +245,7 @@ internal sealed partial class QwenEngine
                 bool optimized = !tiny && OptimizedProjections && TensorOpsPrecision == "fp16";
                 uint threads = tiny || (optimized && choice != 2 && tileRows != 64) ? 128u : 256u;
                 string kernel = tiny ? "expert_matrix_tiny" : ProjectionKernel("expert_matrix") + (optimized ? "_tile" + (tileRows == 16 ? "" : tileRows.ToString()) + (choice == 2 ? "_down" : "_up") : "");
-                gpu.Dispatch2D(kernel, new() { N = rows, K = columns, Kind = choice }, tiny ? rows * 32 : ((rows + 63) / 64) * threads, tileLimit, threads, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
+                gpu.Dispatch2D(kernel, new() { N = rows, K = columns, Kind = choice, Flags = ExpertLayoutFlags }, tiny ? rows * 32 : ((rows + 63) / 64) * threads, tileLimit, threads, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
             }
             if (stagedExperts && ExpertKernel == "fused") {
                 b.PackedExpertInputs ??= Buffer(b.Capacity * 8 * Hidden / 2);
@@ -251,8 +253,8 @@ internal sealed partial class QwenEngine
                 gpu.Dispatch("expert_input_half", p, p.M * Hidden / 4, 128, b.Norm, b.SortedTokens, b.PackedExpertInputs);
                 // The activation buffer is deliberately FP16 on this path. Down reads
                 // it directly; no global gate/up outputs or activation repack needed.
-                gpu.Dispatch2D("expert_gate_up_staged", p, 16 * 64, tileLimit, 64, b.PackedExpertInputs, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertActivation);
-                gpu.Dispatch2D("expert_matrix_staged", new() { N = Hidden, K = 512, Kind = 2 }, (Hidden / 64) * 64, tileLimit, 64, b.ExpertActivation, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertOutput);
+                gpu.Dispatch2D(PackedExperts ? "ablation_gate_up_packed" : "expert_gate_up_staged", p, 16 * 64, tileLimit, 64, b.PackedExpertInputs, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertActivation);
+                gpu.Dispatch2D(PackedExperts ? "ablation_matrix_packed" : "expert_matrix_staged", new() { N = Hidden, K = 512, Kind = 2 }, (Hidden / 64) * 64, tileLimit, 64, b.ExpertActivation, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertOutput);
             } else {
                 ExpertProjection(0, 512, Hidden, b.Norm, b.ExpertGate); ExpertProjection(1, 512, Hidden, b.Norm, b.ExpertUp);
                 gpu.Dispatch("silu_product", new() { N = checked((uint)count * 8 * 512) }, checked((uint)count * 8 * 512), 128, b.ExpertGate, b.ExpertUp, b.ExpertActivation);

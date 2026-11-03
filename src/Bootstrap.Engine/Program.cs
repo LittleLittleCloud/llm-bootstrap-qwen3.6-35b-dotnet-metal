@@ -15,6 +15,7 @@ if (command == "profile-delta") { DeltaScanTests.Run(File.ReadAllText(kernelFile
 if (command == "profile-dense-tiles") { DenseTileTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-online-attention") { OnlineAttentionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), Option("--case"), Option("--variants"), args.Contains("--stress"), Option("--kv-cache-precision") != "fp32"); return; }
 if (command == "compare-mlx-kernels") { KernelComparisonBenchmarks.Run(File.ReadAllText(kernelFile), Option("--family") ?? "all", int.Parse(Option("--runs") ?? "9")); return; }
+if (command == "packed-experts-self-test") { PackedExpertTests.Run(File.ReadAllText(kernelFile)); return; }
 if (command == "profile-expert-fusion") { ExpertFusionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--layouts")); return; }
 if (command == "profile-expert-routing") { ExpertRoutingTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-experts") { ExpertThroughputTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "3"), layouts: args.Contains("--layouts"), reverse: args.Contains("--reverse")); return; }
@@ -31,7 +32,8 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
         bool tunedPrefill = args.Contains("--tuned-prefill");
-        using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow, Option("--kv-cache-precision") ?? (tunedPrefill ? "fp16" : "fp32"));
+        if (args.Contains("--packed-experts") && !tunedPrefill) throw new ArgumentException("--packed-experts requires --tuned-prefill");
+        using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow, Option("--kv-cache-precision") ?? (tunedPrefill ? "fp16" : "fp32"), args.Contains("--packed-experts"));
         if (Option("--draft-dir") is { } draftDirectory) engine.LoadDraft(draftDirectory, Path.Combine(AppContext.BaseDirectory, "draft-manifest.json"));
         bool fastPrefill = tunedPrefill || args.Contains("--fast-prefill");
         engine.TensorOpsPrecision = Option("--tensorops-precision") ?? (args.Contains("--fp32-tensorops") ? "fp32" : fastPrefill ? "fp16" : "legacy");
@@ -52,6 +54,9 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
         engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
         if (command == "moe-self-tests") {
+            if (args.Contains("--packed-model-check")) {
+                engine.PackedExpertModelCheck(File.ReadAllText(Option("--prompt-file")!), File.ReadAllText(Option("--long-prompt-file")!), Option("--expected-answer")!, int.Parse(Option("--runs") ?? "3"), Option("--output-dir")!);
+            }
             if (engine.ValidateDelta) {
                 string validationPrompt = File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required for model DeltaNet validation"));
                 string expected = Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required");

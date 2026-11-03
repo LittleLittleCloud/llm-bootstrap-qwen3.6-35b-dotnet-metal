@@ -27,7 +27,9 @@ internal sealed partial class QwenEngine : IDisposable
     public ByteBpe Tokenizer { get; }
     public ulong AllocatedBytes => gpu.AllocatedBytes;
     GpuBuffer Buffer(int floats) { var result = gpu.Allocate(checked((ulong)floats * 4)); owned.Add(result); return result; }
-    public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow, string kvCachePrecision = "fp32")
+    public bool PackedExperts { get; }
+    uint ExpertLayoutFlags => PackedExperts ? 1024u : 0u;
+    public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow, string kvCachePrecision = "fp32", bool packedExperts = false)
     {
         if (kvCachePrecision is not ("fp16" or "fp32")) throw new ArgumentException("KV cache precision must be fp16 or fp32");
         KvCachePrecision = kvCachePrecision;
@@ -41,7 +43,8 @@ internal sealed partial class QwenEngine : IDisposable
         if (Context > geometry.GetProperty("max_position_embeddings").GetInt32()) throw new NotSupportedException("Configured context exceeds the checkpoint's native context");
         if (geometry.GetProperty("hidden_size").GetInt32() != Hidden || geometry.GetProperty("num_hidden_layers").GetInt32() != 40 || geometry.GetProperty("num_experts").GetInt32() != 256 || geometry.GetProperty("num_experts_per_tok").GetInt32() != 8 || geometry.GetProperty("vocab_size").GetInt32() != Vocabulary) throw new NotSupportedException("Unexpected model geometry");
         gpu = new Metal(File.ReadAllText(kernelPath));
-        weights = new Checkpoint(gpu, directory, manifestPath);
+        PackedExperts = packedExperts;
+        weights = new Checkpoint(gpu, directory, manifestPath, packedExperts);
         x = Buffer(Hidden); norm = Buffer(Hidden); attention = Buffer(4096); projection = Buffer(Hidden); qkv = Buffer(8192); z = Buffer(4096); a = Buffer(32); b = Buffer(32); conv = Buffer(8192); q = Buffer(4096); k = Buffer(512 * 4); rotated = Buffer(4096); qgate = Buffer(4096); v = Buffer(512); scores = Buffer(16 * cacheCapacity); router = Buffer(256); ids = Buffer(8); rates = Buffer(8); expertActivation = Buffer(8 * 512); expertOutput = Buffer(8 * Hidden); sharedGate = Buffer(512); sharedUp = Buffer(512); sharedActivation = Buffer(512); sharedOutput = Buffer(Hidden); sharedWeight = Buffer(1); logits = Buffer(Vocabulary); next = Buffer(1); dummy = Buffer(1);
         for (int layer = 0; layer < 40; layer++)
         {
@@ -146,8 +149,8 @@ internal sealed partial class QwenEngine : IDisposable
             Project(prefix + ".mlp.shared_expert.gate_proj", norm, sharedGate); Project(prefix + ".mlp.shared_expert.up_proj", norm, sharedUp);
             gpu.Dispatch("silu_product", new() { N = 512 }, 512, 128, sharedGate, sharedUp, sharedActivation);
             Project(prefix + ".mlp.shared_expert.down_proj", sharedActivation, sharedOutput); Project(prefix + ".mlp.shared_expert_gate", norm, sharedWeight);
-            gpu.Dispatch("expert_gate_up", new() { N = 512, K = Hidden, M = 8 }, 8 * 512 * 32, 128, norm, weights.Shard("layers-" + layer + ".safetensors"), descriptors[layer], ids, expertActivation);
-            gpu.Dispatch("expert_down", new() { N = Hidden, K = 512, M = 8 }, 8 * Hidden * 32, 128, expertActivation, weights.Shard("layers-" + layer + ".safetensors"), descriptors[layer], ids, expertOutput);
+            gpu.Dispatch("expert_gate_up", new() { N = 512, K = Hidden, M = 8, Flags = ExpertLayoutFlags }, 8 * 512 * 32, 128, norm, weights.Shard("layers-" + layer + ".safetensors"), descriptors[layer], ids, expertActivation);
+            gpu.Dispatch("expert_down", new() { N = Hidden, K = 512, M = 8, Flags = ExpertLayoutFlags }, 8 * Hidden * 32, 128, expertActivation, weights.Shard("layers-" + layer + ".safetensors"), descriptors[layer], ids, expertOutput);
             gpu.Dispatch("mix", new() { N = Hidden, M = 8 }, Hidden, 128, x, expertOutput, rates, sharedOutput, sharedWeight, x);
             ActiveDraft?.Capture(layer, x, 1);
         }

@@ -33,7 +33,7 @@ internal static unsafe class Native
     [DllImport("bootstrap_metal", EntryPoint = "boot_allocated")] internal static extern ulong Allocated(nint context);
     [DllImport("bootstrap_metal", EntryPoint = "boot_begin")] internal static extern int Begin(nint context);
     [DllImport("bootstrap_metal", EntryPoint = "boot_clear")] internal static extern int Clear(nint context, nint buffer);
-    [DllImport("bootstrap_metal", EntryPoint = "boot_dispatch")] internal static extern int Dispatch(nint context, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, nint* buffers, ulong* offsets, int count, in KernelArgs parameters, int parameterBytes, uint x, uint y, uint z, uint tx, uint ty, uint tz);
+    [DllImport("bootstrap_metal", EntryPoint = "boot_dispatch")] internal static extern int Dispatch(nint context, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, nint* buffers, ulong* offsets, int count, in KernelArgs parameters, int parameterBytes, uint x, uint y, uint z, uint tx, uint ty, uint tz, nint indirect, ulong indirectOffset);
     [DllImport("bootstrap_metal", EntryPoint = "boot_profile")] internal static extern void Profile(nint context, int enabled);
     [DllImport("bootstrap_metal", EntryPoint = "boot_end")] internal static extern int End(nint context);
     [DllImport("bootstrap_metal", EntryPoint = "boot_wall_reset")] internal static extern int WallReset(nint context, int sampleAttention);
@@ -100,7 +100,16 @@ internal sealed unsafe class Metal : IDisposable
         nint* handles = stackalloc nint[bindings.Length];
         ulong* offsets = stackalloc ulong[bindings.Length];
         for (int i = 0; i < bindings.Length; i++) { handles[i] = bindings[i].Buffer.Handle; offsets[i] = bindings[i].Offset; }
-        Check(Native.Dispatch(Handle, kernel, handles, offsets, bindings.Length, in parameters, sizeof(KernelArgs), threadsX, threadsY, 1, group, 1, 1));
+        Check(Native.Dispatch(Handle, kernel, handles, offsets, bindings.Length, in parameters, sizeof(KernelArgs), threadsX, threadsY, 1, group, 1, 1, 0, 0));
+    }
+    public void DispatchIndirect(string kernel, KernelArgs parameters, GpuBuffer arguments, ulong argumentOffset, uint group, params Binding[] bindings)
+    {
+        if (argumentOffset % 4 != 0 || argumentOffset > arguments.Length || arguments.Length - argumentOffset < 12)
+            throw new ArgumentOutOfRangeException(nameof(argumentOffset));
+        nint* handles = stackalloc nint[bindings.Length];
+        ulong* offsets = stackalloc ulong[bindings.Length];
+        for (int i = 0; i < bindings.Length; i++) { handles[i] = bindings[i].Buffer.Handle; offsets[i] = bindings[i].Offset; }
+        Check(Native.Dispatch(Handle, kernel, handles, offsets, bindings.Length, in parameters, sizeof(KernelArgs), 1, 1, 1, group, 1, 1, arguments.Handle, argumentOffset));
     }
     public void Dispose() { if (Handle != 0) { Native.Destroy(Handle); Handle = 0; } }
 }
