@@ -32,11 +32,11 @@ if (command == "tensorops-self-test") { TensorOpsSelfTest.Run(File.ReadAllText(k
 if (command == "profile-fast-attention") { FastAttentionTests.Run(File.ReadAllText(Option("--kernel-file") ?? kernelFile), int.Parse(Option("--runs") ?? "3"), args.Contains("--attention-tiles"), Option("--kv-cache-precision") == "fp16"); return; }
 if (command == "profile-attention") { AttentionWallProfile.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--tiled-attention")); return; }
 if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
-if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test")
+    if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test")
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
         bool tunedPrefill = args.Contains("--tuned-prefill");
@@ -90,6 +90,13 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         if (command == "compare-decode-variants") { engine.CompareDecodeVariants(int.Parse(Option("--runs") ?? "3")); return; }
         if (command == "compare-prefill-variants") { engine.ComparePrefillVariants(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required"), args.Contains("--fast-variants"), args.Contains("--projection-variants"), args.Contains("--batch-variants"), args.Contains("--tuned-variants"), args.Contains("--expert-variants"), args.Contains("--final-variants"), args.Contains("--throughput-variants"), args.Contains("--online-variants"), args.Contains("--moe-variants"), args.Contains("--moe-final-variants"), args.Contains("--delta-variants"), args.Contains("--delta-final-variants")); return; }
         if (command == "compare-tensorops") { engine.CompareTensorOps(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3")); return; }
+        if (command == "compare-projection-preparation") {
+            foreach (string name in new[] { "--prompt-file", "--long-prompt-file" }) {
+                var file = Option(name) ?? throw new ArgumentException(name + " is required");
+                engine.CompareProjectionPreparation(File.ReadAllText(file), int.Parse(Option("--runs") ?? "3"));
+            }
+            return;
+        }
         if (command == "profile-prefill") {
             engine.ProfilePrefill(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), args.Contains("--all-kernels"));
             if (Option("--long-prompt-file") is { } longer)
