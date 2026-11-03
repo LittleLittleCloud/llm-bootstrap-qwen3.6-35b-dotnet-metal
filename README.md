@@ -731,3 +731,32 @@ updated profiles, byte-preserving FP8 layout experiments, negative Dense tile
 results, and the opt-in `--delta-mode staged8` recurrence. This development path
 keeps FP32 state and has paired local speedups; it is not yet a new official
 endpoint result or the serving default.
+
+### Byte-preserving expert layout experiment
+
+`--packed-experts --tuned-prefill --delta-mode staged8` reorders each FP8 expert
+matrix once while loading the verified checkpoint. It uses the existing private
+file mapping and a temporary matrix-sized CPU buffer; original checkpoint files,
+FP8 values, BF16 scales and tensor offsets remain unchanged. Only one model-sized
+weight allocation is retained. Loading becomes more expensive and dirties private
+mapped pages; evaluate startup and memory separately from warm prefill.
+
+This opt-in layout requires fused gathered FP16 prefill. Decode and speculative
+verification understand the same packed bytes and retain their FP32 arithmetic.
+It does not enable the experimental lower-precision epilogues, tiny-row fallback,
+or indirect dispatch. Those variants remain available in the research harness.
+
+Reproduce all four expert ablations (same tile predecoded FP16, FP8 layout/scale
+metadata, FP16 epilogue, and small-row/indirect dispatch):
+
+```sh
+python3 scripts/run-expert-ablations.py --splash /path/to/pinned/splash --runs 5 --label forward
+python3 scripts/run-expert-ablations.py --splash /path/to/pinned/splash --runs 5 --label reverse --reverse
+python3 scripts/run-expert-ablations.py --splash /path/to/pinned/splash --runs 0 --fixture broad --label broad
+MTL_SHADER_VALIDATION=1 dotnet run -c Release --project src/Bootstrap.Engine -- packed-experts-self-test
+```
+
+Use the unmodified Splash revision documented in
+[the matched kernel comparison](docs/SPLASH_KERNEL_COMPARISON.md). The ablation
+runner reuses that harness but measures Bootstrap variants only. These are
+local development measurements, not official evaluator reports.

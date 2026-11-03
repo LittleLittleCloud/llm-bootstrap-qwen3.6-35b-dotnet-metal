@@ -126,7 +126,7 @@ int boot_clear(void *handle,void *buffer) { @autoreleasepool {
     id<MTLBlitCommandEncoder> blit=[c->command blitCommandEncoder];
     Buffer *b=(Buffer*)buffer;[blit fillBuffer:b->value range:NSMakeRange(0,b->value.length) value:0];[blit endEncoding];return 1;
 }}
-int boot_dispatch(void *handle,const char *name,void **buffers,const uint64_t *offsets,int count,const void *parameters,int parameter_bytes,uint32_t x,uint32_t y,uint32_t z,uint32_t tx,uint32_t ty,uint32_t tz) { @autoreleasepool {
+int boot_dispatch(void *handle,const char *name,void **buffers,const uint64_t *offsets,int count,const void *parameters,int parameter_bytes,uint32_t x,uint32_t y,uint32_t z,uint32_t tx,uint32_t ty,uint32_t tz,void *indirect,uint64_t indirect_offset) { @autoreleasepool {
     Context *c=(Context*)handle; id<MTLComputePipelineState> pipeline;
     auto found=c->pipelines.find(name);
     if(found==c->pipelines.end()){
@@ -157,7 +157,11 @@ int boot_dispatch(void *handle,const char *name,void **buffers,const uint64_t *o
     [c->encoder setComputePipelineState:pipeline];
     for(int i=0;i<count;++i){Buffer *b=(Buffer*)buffers[i];[c->encoder setBuffer:b->value offset:offsets[i] atIndex:i];}
     [c->encoder setBytes:parameters length:parameter_bytes atIndex:15];
-    [c->encoder dispatchThreads:MTLSizeMake(x,y,z) threadsPerThreadgroup:MTLSizeMake(tx,ty,tz)];
+    if(indirect){
+        Buffer *args=(Buffer*)indirect;
+        if(indirect_offset%4 || indirect_offset>args->value.length || args->value.length-indirect_offset<12){c->error="Invalid indirect dispatch arguments";return 0;}
+        [c->encoder dispatchThreadgroupsWithIndirectBuffer:args->value indirectBufferOffset:indirect_offset threadsPerThreadgroup:MTLSizeMake(tx,ty,tz)];
+    }else [c->encoder dispatchThreads:MTLSizeMake(x,y,z) threadsPerThreadgroup:MTLSizeMake(tx,ty,tz)];
     if(c->wall_enabled)c->wall[5]++;
     if(c->all_samples || sample_kind>=0){[c->encoder endEncoding];c->encoder=nil;}
     // Opt-in diagnostic mode serializes submissions and is never used for formal timing.
