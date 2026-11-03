@@ -4,6 +4,15 @@ internal sealed partial class QwenEngine
 {
     string deltaMode = "baseline";
     public bool ValidateDelta { get; set; }
+    string deltaPreparation = "baseline";
+    public string DeltaPreparation
+    {
+        get => deltaPreparation;
+        set {
+            if (value is not ("baseline" or "parallel" or "fused")) throw new ArgumentException("Invalid DeltaNet preparation");
+            if (deltaPreparation != value) { ClearPrefixCache(); deltaPreparation = value; }
+        }
+    }
     public string DeltaMode
     {
         get => deltaMode;
@@ -151,11 +160,21 @@ internal sealed partial class QwenEngine
             {
                 string path = prefix + ".linear_attn";
                 BatchProject(path + ".in_proj_qkv", b.Norm, b.Qkv, count); BatchProject(path + ".in_proj_z", b.Norm, b.Z, count, reusePackedInput: true); BatchProject(path + ".in_proj_a", b.Norm, b.A, count); BatchProject(path + ".in_proj_b", b.Norm, b.B, count);
-                gpu.Dispatch("batch_conv", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 8192, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv, verify ? verification!.Convolution[layer] : dummy);
-                gpu.Dispatch("batch_l2", new() { M = (uint)count }, checked((uint)count * 16 * 128), 128, b.Conv, b.Q, b.K);
+                bool fusedPreparation = optimizedDelta && DeltaPreparation == "fused";
+                if (fusedPreparation)
+                    gpu.Dispatch("delta_prepare_fused", new() { M = (uint)count }, (uint)count * 16 * 128, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv, b.Q, b.K, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, b.DeltaGates!);
+                else {
+                    if (optimizedDelta && DeltaPreparation == "parallel")
+                        gpu.Dispatch("batch_conv_parallel", new() { M = (uint)count }, (uint)count * 8192, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv);
+                    else
+                        gpu.Dispatch("batch_conv", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 8192, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv, verify ? verification!.Convolution[layer] : dummy);
+                    gpu.Dispatch("batch_l2", new() { M = (uint)count }, checked((uint)count * 16 * 128), 128, b.Conv, b.Q, b.K);
+                }
+                if (optimizedDelta && DeltaPreparation != "baseline")
+                    gpu.Dispatch("batch_conv_carry", new() { M = (uint)count }, 8192, 128, b.Qkv, convolution[layer]);
                 if (optimizedDelta) {
                     if (ValidateDelta) gpu.Dispatch("copy_floats", new() { N = 524288 }, 524288, 128, state[layer], b.DeltaReferenceState!);
-                    gpu.Dispatch("delta_prepare_gates", new() { M = (uint)count }, (uint)count * 32, 128, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, b.DeltaGates!);
+                    if (!fusedPreparation) gpu.Dispatch("delta_prepare_gates", new() { M = (uint)count }, (uint)count * 32, 128, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, b.DeltaGates!);
                     if (DeltaMode == "gates") gpu.Dispatch("batch_delta_gates", new() { M = (uint)count }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, state[layer], b.Rotated, dummy, b.DeltaGates!);
                     else gpu.Dispatch("delta_" + DeltaMode, new() { M = (uint)count }, 32 * 8 * 128, 128, b.Q, b.K, b.Conv, b.DeltaGates!, state[layer], b.Rotated);
                     if (ValidateDelta) {

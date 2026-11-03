@@ -211,6 +211,38 @@ kernel void batch_conv(device const float*x [[buffer(0)]],device const ushort*w 
     if(i>=8192)return;float s0=state[i],s1=state[8192+i],s2=state[16384+i],w0=bf(w[i*4]),w1=bf(w[i*4+1]),w2=bf(w[i*4+2]),w3=bf(w[i*4+3]);
     for(uint t=0;t<p.m;++t){float value=x[t*8192+i];y[t*8192+i]=silu(s0*w0+s1*w1+s2*w2+value*w3);s0=s1;s1=s2;s2=value;if(p.flags&1){tape[t*24576+i]=s0;tape[t*24576+8192+i]=s1;tape[t*24576+16384+i]=s2;}}state[i]=s0;state[8192+i]=s1;state[16384+i]=s2;
 }
+// Read the original carry throughout the dispatch. Updating it is a separate
+// dispatch: a last-token thread cannot overwrite history still read by t=0..2.
+inline float prefill_conv_value(device const float*x,device const ushort*w,device const float*state,uint t,uint c) {
+    float s0=t>=3?x[(t-3)*8192+c]:state[t*8192+c];
+    float s1=t>=2?x[(t-2)*8192+c]:state[(t+1)*8192+c];
+    float s2=t>=1?x[(t-1)*8192+c]:state[16384+c];
+    return silu(s0*bf(w[c*4])+s1*bf(w[c*4+1])+s2*bf(w[c*4+2])+x[t*8192+c]*bf(w[c*4+3]));
+}
+kernel void batch_conv_parallel(device const float*x [[buffer(0)]],device const ushort*w [[buffer(1)]],device const float*state [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i<p.m*8192)y[i]=prefill_conv_value(x,w,state,i/8192,i%8192);
+}
+kernel void batch_conv_carry(device const float*x [[buffer(0)]],device float*state [[buffer(1)]],constant P&p [[buffer(15)]],uint c [[thread_position_in_grid]]) {
+    if(c>=8192)return;
+    float s0=p.m>=3?x[(p.m-3)*8192+c]:state[p.m*8192+c];
+    float s1=p.m>=2?x[(p.m-2)*8192+c]:state[(p.m+1)*8192+c];
+    float s2=x[(p.m-1)*8192+c];
+    state[c]=s0;state[8192+c]=s1;state[16384+c]=s2;
+}
+// FP32 convolution, q/k normalization and gates, with the baseline reduction
+// order and recurrence inputs. Only V occupies the Conv buffer on this path.
+kernel void delta_prepare_fused(device const float*x [[buffer(0)]],device const ushort*w [[buffer(1)]],device const float*state [[buffer(2)]],device float*v [[buffer(3)]],device float*q [[buffer(4)]],device float*k [[buffer(5)]],device const float*a [[buffer(6)]],device const float*b [[buffer(7)]],device const ushort*alog [[buffer(8)]],device const ushort*dt [[buffer(9)]],device float*gates [[buffer(10)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint group [[threadgroup_position_in_grid]]) {
+    uint token=group/16,head=group%16,j=head*128+tid;
+    float query=prefill_conv_value(x,w,state,token,j),key=prefill_conv_value(x,w,state,token,2048+j);
+    threadgroup float qs[4],ks[4];threadgroup float qi,ki;
+    float qa=simd_sum(query*query),ka=simd_sum(key*key);
+    if((tid&31)==0){qs[tid/32]=qa;ks[tid/32]=ka;}threadgroup_barrier(mem_flags::mem_threadgroup);
+    qa=simd_sum(tid<4?qs[tid]:0);ka=simd_sum(tid<4?ks[tid]:0);
+    if(tid==0){qi=rsqrt(qa+1e-6f)*rsqrt(128.0f);ki=rsqrt(ka+1e-6f);}threadgroup_barrier(mem_flags::mem_threadgroup);
+    q[token*2048+j]=query*qi;k[token*2048+j]=key*ki;
+    for(uint h=0;h<2;h++){uint c=4096+(head*2+h)*128+tid;v[token*8192+c]=prefill_conv_value(x,w,state,token,c);}
+    if(tid<2){uint h=head*2+tid,i=token*32+h;gates[token*64+h]=exp(-exp(bf(alog[h]))*softplus(a[i]+bf(dt[h])));gates[token*64+32+h]=sigmoid(b[i]);}
+}
 kernel void batch_l2(device const float*x [[buffer(0)]],device float*q [[buffer(1)]],device float*k [[buffer(2)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint group [[threadgroup_position_in_grid]]) {
     uint token=group/16,head=group%16,j=head*128+tid;threadgroup float qs[4],ks[4];threadgroup float qi,ki;float a=x[token*8192+j],b=x[token*8192+2048+j];float qa=simd_sum(a*a),ka=simd_sum(b*b);
     if((tid&31)==0){qs[tid/32]=qa;ks[tid/32]=ka;}threadgroup_barrier(mem_flags::mem_threadgroup);qa=simd_sum(tid<4?qs[tid]:0);ka=simd_sum(tid<4?ks[tid]:0);if(tid==0){qi=rsqrt(qa+1e-6f)*rsqrt(128.0f);ki=rsqrt(ka+1e-6f);}threadgroup_barrier(mem_flags::mem_threadgroup);q[token*2048+j]=a*qi;k[token*2048+j]=b*ki;
