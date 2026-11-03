@@ -1446,14 +1446,16 @@ inline void expert_affine_accumulate(device half*x,device const uchar*w,device c
     matmul2d<desc,execution_simdgroups<1>> op;
     auto full=tensor(x,dextents<int,2>{int(k),int(live)},array<int,2>{1,int(k)});
     auto b=tensor(stage,extents<int,32,32>{},array<int,2>{1,32});
-    uint row=firstColumn+lane;float scale=0,bias=0;
+    uint row=firstColumn+lane;float scale=0,bias=0;uchar4 bytes[8];
     for(uint block=0;block<k;block+=32){
-        if(row<n&&block%64==0){ushort2 sb=((device const ushort2*)s)[(row/32)*(k/64)*32+(block/64)*32+row%32];scale=bf(sb.x);bias=bf(sb.y);}
-        for(uint j=0;j<8;j++){
-            half4 value=half4(0);
-            if(row<n){uchar4 code=*((device const uchar4*)(w+expert_byte_offset<2>(row,block+j*4,k)));value=half4(fma(float4(code),float4(scale),float4(bias)));}
-            *((threadgroup half4*)(stage+lane*32+j*4))=value;
+        // Load the K32 payload before decoding/storing it, exposing independent
+        // reads without changing operand rounding or the single-stage barriers.
+        if(row<n){
+            for(uint j=0;j<8;j++)bytes[j]=*((device const uchar4*)(w+expert_byte_offset<2>(row,block+j*4,k)));
+            if(block%64==0){ushort2 sb=((device const ushort2*)s)[(row/32)*(k/64)*32+(block/64)*32+row%32];scale=bf(sb.x);bias=bf(sb.y);}
         }
+        for(uint j=0;j<8;j++)*((threadgroup half4*)(stage+lane*32+j*4))=
+            row<n?half4(fma(float4(bytes[j]),float4(scale),float4(bias))):half4(0);
         simdgroup_barrier(mem_flags::mem_threadgroup);
         auto a=full.slice<32,Rows>(int(block),0);op.run(a,b,acc);
         simdgroup_barrier(mem_flags::mem_threadgroup);
