@@ -11,6 +11,10 @@ string? Option(string name)
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 var manifestFile = Path.Combine(AppContext.BaseDirectory, "model-manifest.json");
+if (args.Contains("--affine-cache") && (Option("--affine-cache") is not { } affinePath || affinePath.StartsWith("--", StringComparison.Ordinal)))
+    throw new ArgumentException("--affine-cache requires a directory");
+if (command == "convert-affine8") { AffineWeights.ConvertCheckpoint(Option("--model-dir") ?? throw new ArgumentException("--model-dir is required"), Option("--output-dir") ?? throw new ArgumentException("--output-dir is required"), manifestFile); return; }
+if (command == "affine8-self-test") { AffineTests.Run(File.ReadAllText(kernelFile)); return; }
 if (command == "profile-delta") { DeltaScanTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-dense-tiles") { DenseTileTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-online-attention") { OnlineAttentionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), Option("--case"), Option("--variants"), args.Contains("--stress"), Option("--kv-cache-precision") != "fp32"); return; }
@@ -32,8 +36,8 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
         bool tunedPrefill = args.Contains("--tuned-prefill");
-        if (args.Contains("--packed-experts") && !tunedPrefill) throw new ArgumentException("--packed-experts requires --tuned-prefill");
-        using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow, Option("--kv-cache-precision") ?? (tunedPrefill ? "fp16" : "fp32"), args.Contains("--packed-experts"));
+        if ((args.Contains("--packed-experts") || Option("--affine-cache") is not null) && !tunedPrefill) throw new ArgumentException("Packed/affine experts require --tuned-prefill");
+        using var engine = new QwenEngine(directory, kernelFile, manifestFile, contextWindow, Option("--kv-cache-precision") ?? (tunedPrefill ? "fp16" : "fp32"), args.Contains("--packed-experts"), Option("--affine-cache"));
         if (Option("--draft-dir") is { } draftDirectory) engine.LoadDraft(draftDirectory, Path.Combine(AppContext.BaseDirectory, "draft-manifest.json"));
         bool fastPrefill = tunedPrefill || args.Contains("--fast-prefill");
         engine.TensorOpsPrecision = Option("--tensorops-precision") ?? (args.Contains("--fp32-tensorops") ? "fp32" : fastPrefill ? "fp16" : "legacy");
@@ -275,4 +279,4 @@ if (command == "kernel-self-test")
     Console.WriteLine(JsonSerializer.Serialize(new { passed = checks, allocated_bytes = device.AllocatedBytes, native_model_backend = "original Metal kernels" }));
     return;
 }
-Console.WriteLine("Bootstrap .NET + Metal engine. Commands: kernel-self-test");
+Console.WriteLine("Bootstrap .NET + Metal engine. Commands: serve, generate, convert-affine8, affine8-self-test, kernel-self-test. See README.md for options and diagnostics.");

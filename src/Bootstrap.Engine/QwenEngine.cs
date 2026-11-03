@@ -28,8 +28,9 @@ internal sealed partial class QwenEngine : IDisposable
     public ulong AllocatedBytes => gpu.AllocatedBytes;
     GpuBuffer Buffer(int floats) { var result = gpu.Allocate(checked((ulong)floats * 4)); owned.Add(result); return result; }
     public bool PackedExperts { get; }
-    uint ExpertLayoutFlags => PackedExperts ? 1024u : 0u;
-    public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow, string kvCachePrecision = "fp32", bool packedExperts = false)
+    public bool Affine8 { get; }
+    uint ExpertLayoutFlags => (PackedExperts ? 1024u : 0u) | (Affine8 ? 2048u : 0u);
+    public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow, string kvCachePrecision = "fp32", bool packedExperts = false, string? affineCache = null)
     {
         if (kvCachePrecision is not ("fp16" or "fp32")) throw new ArgumentException("KV cache precision must be fp16 or fp32");
         KvCachePrecision = kvCachePrecision;
@@ -43,8 +44,11 @@ internal sealed partial class QwenEngine : IDisposable
         if (Context > geometry.GetProperty("max_position_embeddings").GetInt32()) throw new NotSupportedException("Configured context exceeds the checkpoint's native context");
         if (geometry.GetProperty("hidden_size").GetInt32() != Hidden || geometry.GetProperty("num_hidden_layers").GetInt32() != 40 || geometry.GetProperty("num_experts").GetInt32() != 256 || geometry.GetProperty("num_experts_per_tok").GetInt32() != 8 || geometry.GetProperty("vocab_size").GetInt32() != Vocabulary) throw new NotSupportedException("Unexpected model geometry");
         gpu = new Metal(File.ReadAllText(kernelPath));
-        PackedExperts = packedExperts;
-        weights = new Checkpoint(gpu, directory, manifestPath, packedExperts);
+        Affine8 = affineCache is not null;
+        PackedExperts = packedExperts || Affine8;
+        weights = new Checkpoint(gpu, directory, manifestPath, packedExperts, affineCache);
+        if (Affine8 && (weights["model.language_model.embed_tokens.weight"].Kind != 3 || weights["lm_head.weight"].Kind != 3))
+            throw new InvalidDataException("Affine v2 requires quantized vocabulary matrices");
         x = Buffer(Hidden); norm = Buffer(Hidden); attention = Buffer(4096); projection = Buffer(Hidden); qkv = Buffer(8192); z = Buffer(4096); a = Buffer(32); b = Buffer(32); conv = Buffer(8192); q = Buffer(4096); k = Buffer(512 * 4); rotated = Buffer(4096); qgate = Buffer(4096); v = Buffer(512); scores = Buffer(16 * cacheCapacity); router = Buffer(256); ids = Buffer(8); rates = Buffer(8); expertActivation = Buffer(8 * 512); expertOutput = Buffer(8 * Hidden); sharedGate = Buffer(512); sharedUp = Buffer(512); sharedActivation = Buffer(512); sharedOutput = Buffer(Hidden); sharedWeight = Buffer(1); logits = Buffer(Vocabulary); next = Buffer(1); dummy = Buffer(1);
         for (int layer = 0; layer < 40; layer++)
         {
@@ -56,7 +60,8 @@ internal sealed partial class QwenEngine : IDisposable
             for (int e = 0; e < 256; e++)
             {
                 var gate = weights[prefix + e + ".gate_proj.weight"]; var up = weights[prefix + e + ".up_proj.weight"]; var down = weights[prefix + e + ".down_proj.weight"];
-                if (gate.Dtype != "F8_E4M3" || up.Dtype != "F8_E4M3" || down.Dtype != "F8_E4M3") throw new InvalidDataException("Experts must preserve official FP8 storage");
+                string expected = Affine8 ? "AFFINE8" : "F8_E4M3";
+                if (gate.Dtype != expected || up.Dtype != expected || down.Dtype != expected) throw new InvalidDataException("Unexpected expert weight format");
                 table[e * 6] = gate.Offset; table[e * 6 + 1] = weights[prefix + e + ".gate_proj.weight_scale_inv"].Offset;
                 table[e * 6 + 2] = up.Offset; table[e * 6 + 3] = weights[prefix + e + ".up_proj.weight_scale_inv"].Offset;
                 table[e * 6 + 4] = down.Offset; table[e * 6 + 5] = weights[prefix + e + ".down_proj.weight_scale_inv"].Offset;
@@ -87,11 +92,18 @@ internal sealed partial class QwenEngine : IDisposable
         Console.Error.WriteLine($"KV capacity grew to {capacity} tokens; KV precision={KvCachePrecision}; target KV bytes={TargetKvBytes}; Metal buffer bytes={AllocatedBytes}");
     }
     static string Prefix(int layer) => "model.language_model.layers." + layer;
+    void BatchEmbed(GpuBuffer tokens, GpuBuffer output, int count)
+    {
+        const string name = "model.language_model.embed_tokens.weight";
+        var tensor = weights[name];
+        gpu.Dispatch(Affine8 ? "batch_embedding_affine" : "batch_embedding", new() { M = (uint)count }, (uint)count * Hidden, 128,
+            tensor.Binding, tokens, output, Affine8 ? weights[name + "_scale_inv"].Binding : dummy);
+    }
     void Project(string name, GpuBuffer input, GpuBuffer output)
     {
         var tensor = weights[name + ".weight"];
         if (tensor.Shape.Length != 2) throw new InvalidDataException("Projection weight must be a matrix: " + name);
-        var scaling = tensor.Kind == 0 ? weights[name + ".weight_scale_inv"].Binding : (Binding)dummy;
+        var scaling = tensor.Kind is 0 or 3 ? weights[name + ".weight_scale_inv"].Binding : (Binding)dummy;
         gpu.Dispatch("gemv", new() { N = (uint)tensor.Shape[0], K = (uint)tensor.Shape[1], Kind = tensor.Kind }, checked((uint)tensor.Shape[0] * 32), 128, input, tensor.Binding, scaling, output);
     }
     void Normalize(GpuBuffer input, string name, GpuBuffer output, uint dimension = Hidden, uint heads = 1, bool offset = true, GpuBuffer? gate = null)
@@ -116,7 +128,8 @@ internal sealed partial class QwenEngine : IDisposable
     {
         if (position < 0 || position >= Context) throw new ArgumentOutOfRangeException(nameof(position));
         EnsureCacheCapacity(position + 1);
-        gpu.Begin(); gpu.Dispatch("embedding", new() { N = Hidden, Position = (uint)token }, Hidden, 128, weights["model.language_model.embed_tokens.weight"].Binding, x);
+        gpu.Begin(); gpu.Dispatch(Affine8 ? "embedding_affine" : "embedding", new() { N = Hidden, Position = (uint)token }, Hidden, 128,
+            weights["model.language_model.embed_tokens.weight"].Binding, x, Affine8 ? weights["model.language_model.embed_tokens.weight_scale_inv"].Binding : dummy);
         for (int layer = 0; layer < 40; layer++)
         {
             string prefix = Prefix(layer); Normalize(x, prefix + ".input_layernorm", norm);

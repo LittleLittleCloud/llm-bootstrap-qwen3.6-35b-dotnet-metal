@@ -1,4 +1,4 @@
-# Bootstrap FP8 engine (.NET + Metal)
+# Bootstrap FP8 / affine-8 engine (.NET + Metal)
 
 Independent implementation for LLM Bootstrap experiment
 `2026-10-29-bootstrap-dogfood-001`. The contract was frozen at
@@ -12,9 +12,12 @@ There is no MLX, Transformers, llama.cpp, Infer.NET or external inference servic
 in this candidate's execution path. Baseline source was inspected for model
 architecture, but no backend code was copied.
 
-The model is official `Qwen/Qwen3.6-35B-A3B-FP8`, pinned at
-`95a723d08a9490559dae23d0cff1d9466213d989`. Packed E4M3 weights and their block
-scales are read directly; source BF16 tensors retain their values. Default computation,
+The source model is official `Qwen/Qwen3.6-35B-A3B-FP8`, pinned at
+`95a723d08a9490559dae23d0cff1d9466213d989`. By default, packed E4M3 weights and their block
+scales are read directly; source BF16 tensors retain their values. The optional
+`--affine-cache` path uses a verified affine-8 derivative, including quantized
+embedding and output-head matrices; see [the affine-8 instructions](docs/AFFINE8.md).
+It is not the MLX community checkpoint. Default computation,
 KV and recurrent state are FP32. The opt-in `--fast-prefill` preset uses FP16
 projection and attention operands with FP32 accumulation, softmax, KV and recurrent
 state; see the fast-prefill measurements below. `--tuned-prefill` now selects FP16
