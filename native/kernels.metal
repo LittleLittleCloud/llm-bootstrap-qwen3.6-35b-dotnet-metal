@@ -1153,7 +1153,7 @@ kernel void attention_query_grouped_half(device const float*x [[buffer(0)]],devi
 
 // Reuse each FP32 score row for FP16 probabilities after its reduction.
 // The unused second half holds rescaling and denominator values.
-template<int BQ,int BK,int SG,int G,bool Interior=false>
+template<int BQ,int BK,int SG,int G,bool Interior=false,bool ReuseScale=false>
 inline void attention_online_reuse(device half*q,device half*k,device half*v,device const float*gate,device float*y,constant P&p,uint tid,uint lane,uint sid,uint3 group,threadgroup float*score) {
     threadgroup half*prob=(threadgroup half*)score;
     float maxima[BQ/SG],denoms[BQ/SG];
@@ -1187,7 +1187,13 @@ inline void attention_online_reuse(device half*q,device half*k,device half*v,dev
         for(uint ir=0;ir<BQ/SG;++ir){
             uint r=sid+ir*SG;
             uint logical=first+r,row=logical/G;float vals[BK/32],top=-INFINITY;
-            for(uint j=0;j<BK/32;++j){uint t=key+lane+j*32;float a=(row<p.m&&t<p.k&&t<=p.pos+row)?score[r*BK+lane+j*32]*(1.0f/16.0f):-INFINITY;vals[j]=a;top=max(top,a);}
+            // A full historical block is visible to every query in this tile.
+            // Keep the original per-row mask at the causal edge and all tails.
+            if(ReuseScale&&first+BQ<=p.m*G&&key+BK<=min(p.k,p.pos+first/G+1)){
+                for(uint j=0;j<BK/32;++j){float a=score[r*BK+lane+j*32]*(1.0f/16.0f);vals[j]=a;top=max(top,a);}
+            }else{
+                for(uint j=0;j<BK/32;++j){uint t=key+lane+j*32;float a=(row<p.m&&t<p.k&&t<=p.pos+row)?score[r*BK+lane+j*32]*(1.0f/16.0f):-INFINITY;vals[j]=a;top=max(top,a);}
+            }
             float next=max(maxima[ir],simd_max(top));
             float decay=row<p.m?exp(maxima[ir]-next):1.0f,total=0;
             for(uint j=0;j<BK/32;++j){float value=row<p.m?exp(vals[j]-next):0.0f;prob[r*(BK*2)+lane+j*32]=half(value);total+=value;}
@@ -1196,7 +1202,11 @@ inline void attention_online_reuse(device half*q,device half*k,device half*v,dev
             if(lane==0){score[r*BK+BK/2]=decay;score[r*BK+BK/2+1]=denoms[ir];}
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for(uint i=0;i<out.get_capacity();++i){auto c=out.get_multidimensional_index(i);if(c[1]<BQ&&c[0]<256)out[i]*=score[c[1]*BK+BK/2];}
+        // Every SIMD group checks every row, so the branch is uniform across
+        // the threadgroup. No extra shared storage beyond the 32 KiB tile.
+        bool changed=!ReuseScale;
+        if constexpr(ReuseScale)for(uint r=lane;r<BQ;r+=32)changed|=score[r*BK+BK/2]!=1.0f;
+        if(simd_any(changed))for(uint i=0;i<out.get_capacity();++i){auto c=out.get_multidimensional_index(i);if(c[1]<BQ&&c[0]<256)out[i]*=score[c[1]*BK+BK/2];}
         auto rightValues=values.slice(0,int(key));
         if constexpr(Interior){if(key+BK<=p.k){auto b=values.template slice<256,BK>(0,int(key));vop.run(probabilities,b,out);}else vop.run(probabilities,rightValues,out);}
         else vop.run(probabilities,rightValues,out);
@@ -1212,6 +1222,10 @@ kernel void attention_online_q##BQ##_k##BK##_s##SG##_g##G##_r1(device half*q [[b
 ONLINE_REUSE(32,256,8,1)
 ONLINE_REUSE(32,256,8,8)
 #undef ONLINE_REUSE
+
+kernel void attention_online_q32_k256_s8_g8_r2(device half*q [[buffer(0)]],device half*k [[buffer(1)]],device half*v [[buffer(2)]],device const float*gate [[buffer(3)]],device float*y [[buffer(4)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint lane [[thread_index_in_simdgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
+    threadgroup float score[32*256];attention_online_reuse<32,256,8,8,true,true>(q,k,v,gate,y,p,tid,lane,sid,group,score);
+}
 
 
 // One SIMD group owns 32 output columns. Prefetch packed FP8 bytes into
@@ -1351,22 +1365,45 @@ kernel void delta_prepare_gates(device const float*a [[buffer(0)]],device const 
 
 // Eight lanes share a value row. A group carries sixteen rows in registers.
 // Blocked variants share Q/K across those rows, without changing input precision.
-template<int Block,bool Staged>
+template<int Block,bool Staged,bool Prefetch=false>
 kernel void delta_scan(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*v [[buffer(2)]],device const float*gates [[buffer(3)]],device float*state [[buffer(4)]],device float*y [[buffer(5)]],constant P&p [[buffer(15)]],uint group [[threadgroup_position_in_grid]],uint tid [[thread_index_in_threadgroup]]) {
+    static_assert(!Prefetch || (Staged && Block%4==0), "prefetch requires whole FP32 vectors and a shared stage");
     uint h=group/8,first=(group%8)*16,row=tid/8,col=(tid%8)*16,kh=h/2;
     uint base=(h*128+first+row)*128+col;
     float4 cell[4];
     for(uint j=0;j<4;j++)cell[j]=*((device const float4*)(state+base+j*4));
     threadgroup float keys[Staged?Block*128:1],queries[Staged?Block*128:1];
     threadgroup float values[Staged?Block*16:1],decay[Staged?Block:1],beta[Staged?Block:1];
+    // Fetch the next block while the dependent recurrence uses shared memory.
+    // FP32 inputs, state and the order of every recurrence operation are kept.
+    float4 keyFetch[Prefetch?Block/4:1]={},queryFetch[Prefetch?Block/4:1]={},valueFetch=0;
+    float2 gateFetch=0;
+    auto fetch=[&](uint start){
+        if constexpr(Prefetch){
+            for(uint j=0;j<Block/4;j++){
+                uint at=(j*128+tid)*4,t=start+at/128,c=at%128;
+                if(t<p.m){keyFetch[j]=*((device const float4*)(k+t*2048+kh*128+c));queryFetch[j]=*((device const float4*)(q+t*2048+kh*128+c));}
+            }
+            if(tid<Block*4){uint at=tid*4,t=start+at/16;if(t<p.m)valueFetch=*((device const float4*)(v+t*8192+4096+h*128+first+at%16));}
+            if(tid<Block&&start+tid<p.m)gateFetch=float2(gates[(start+tid)*64+h],gates[(start+tid)*64+32+h]);
+        }
+    };
+    if constexpr(Prefetch)fetch(0);
     for(uint start=0;start<p.m;start+=Block){
         uint count=min(uint(Block),p.m-start);
         if constexpr(Staged){
-            for(uint i=tid;i<count*128;i+=128){uint t=start+i/128,c=i%128;keys[i]=k[t*2048+kh*128+c];queries[i]=q[t*2048+kh*128+c];}
-            for(uint i=tid;i<count*16;i+=128)values[i]=v[(start+i/16)*8192+4096+h*128+first+i%16];
-            if(tid<count){decay[tid]=gates[(start+tid)*64+h];beta[tid]=gates[(start+tid)*64+32+h];}
+            if constexpr(Prefetch){
+                for(uint j=0;j<Block/4;j++){uint at=(j*128+tid)*4;*((threadgroup float4*)(keys+at))=keyFetch[j];*((threadgroup float4*)(queries+at))=queryFetch[j];}
+                if(tid<Block*4)*((threadgroup float4*)(values+tid*4))=valueFetch;
+                if(tid<Block){decay[tid]=gateFetch.x;beta[tid]=gateFetch.y;}
+            }else{
+                for(uint i=tid;i<count*128;i+=128){uint t=start+i/128,c=i%128;keys[i]=k[t*2048+kh*128+c];queries[i]=q[t*2048+kh*128+c];}
+                for(uint i=tid;i<count*16;i+=128)values[i]=v[(start+i/16)*8192+4096+h*128+first+i%16];
+                if(tid<count){decay[tid]=gates[(start+tid)*64+h];beta[tid]=gates[(start+tid)*64+32+h];}
+            }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
+        if constexpr(Prefetch)if(start+Block<p.m)fetch(start+Block);
         for(uint t=0;t<count;t++){
             float d=Staged?decay[t]:gates[(start+t)*64+h];
             float b=Staged?beta[t]:gates[(start+t)*64+32+h];
@@ -1390,7 +1427,8 @@ kernel void delta_scan(device const float*q [[buffer(0)]],device const float*k [
     for(uint j=0;j<4;j++)*((device float4*)(state+base+j*4))=cell[j];
 }
 template [[host_name("delta_direct8")]] kernel decltype(delta_scan<16,false>) delta_scan<16,false>;
-template [[host_name("delta_staged8")]] kernel decltype(delta_scan<8,true>) delta_scan<8,true>;
+template [[host_name("delta_staged8_reference")]] kernel decltype(delta_scan<8,true>) delta_scan<8,true>;
+template [[host_name("delta_staged8")]] kernel decltype(delta_scan<8,true,true>) delta_scan<8,true,true>;
 template [[host_name("delta_staged16")]] kernel decltype(delta_scan<16,true>) delta_scan<16,true>;
 
 // Development sweep: direct device FP16 operands and FP32 accumulation/output.
@@ -1514,7 +1552,10 @@ inline void expert_ablation_run(device half*x,device const uchar*raw,device cons
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if(sid==1)for(uint i=0;i<acc.get_capacity();++i){if(!acc.is_valid_element(i))continue;auto c=acc.get_multidimensional_index(i);if(c[1]<tile.count&&column+c[0]<p.n)((device half*)y)[(tile.first+c[1])*p.n+column+c[0]]=half(silu(float(gate[c[1]*32+c[0]]))*acc[i]);}
     }else{
-        for(uint i=0;i<acc.get_capacity();++i){if(!acc.is_valid_element(i))continue;auto c=acc.get_multidimensional_index(i);if(c[1]<tile.count&&column+c[0]<p.n){uint at=(tile.first+c[1])*p.n+column+c[0];if constexpr(Options&2)((device half*)y)[at]=half(acc[i]);else y[at]=acc[i];}}
+        if constexpr(Layout==4 && !(Options&2)){
+            auto result=tensor(y+tile.first*p.n,dextents<int,2>{int(p.n),int(tile.count)},array<int,2>{1,int(p.n)});
+            auto dest=result.slice(int(column),0);acc.store(dest);
+        }else for(uint i=0;i<acc.get_capacity();++i){if(!acc.is_valid_element(i))continue;auto c=acc.get_multidimensional_index(i);if(c[1]<tile.count&&column+c[0]<p.n){uint at=(tile.first+c[1])*p.n+column+c[0];if constexpr(Options&2)((device half*)y)[at]=half(acc[i]);else y[at]=acc[i];}}
     }
 }
 template<bool Prefetch,bool Fused,int KS=32,int Layout=0,int Options=0>

@@ -10,7 +10,7 @@ internal static class OnlineAttentionTests
         if (selectedCase is not null) { var dims = selectedCase.Split(',').Select(int.Parse).ToArray(); if (dims.Length != 2 || dims[0] < 0 || dims[1] < 1 || (long)dims[0] + dims[1] > ContextLimits.NativeWindow) throw new ArgumentException("--case requires history,rows within the native context window"); }
         using var gpu = new Metal(source);
         using var device = new DeviceAttentionWorkspace(gpu);
-        var variants = halfKv ? new[] { "baseline", "q32_k256_s8_g1_r1", "q32_k256_s8_g8_r1", "selected" } : new[] { "baseline", "selected" };
+        var variants = halfKv ? new[] { "baseline", "q32_k256_s8_g1_r1", "q32_k256_s8_g8_r1", "q32_k256_s8_g8_r2", "selected" } : new[] { "baseline", "selected" };
         if (selectedVariants is not null) { var requested = selectedVariants.Split(','); if (requested.Any(v => !variants.Contains(v))) throw new ArgumentException("Unknown online attention variant"); variants = requested; }
         var cases = new[] { (0, 1), (17, 7), (127, 31), (127, 32), (257, 33), (127, 63), (0, 512), (0, 2048), (8192, 2048), (10520, 190), (32768, 63), (30000, 2048) };
         if (selectedCase is not null) { var c = selectedCase.Split(',').Select(int.Parse).ToArray(); cases = [(c[0], c[1])]; }
@@ -51,6 +51,16 @@ internal static class OnlineAttentionTests
                 // Compare every candidate to FP64 softmax with FP16 Q/K/V.
                 // The fused path rounds block-local exponentials to FP16.
                 double error = Check(q, k, v, gate, output, rows, history);
+                bool compareOriginal = halfKv && (variant == "q32_k256_s8_g8_r2" || variant == "selected" && rows >= 32);
+                if (compareOriginal)
+                {
+                    var p = new KernelArgs { M = (uint)rows, K = (uint)length, Position = (uint)history, A = 8 };
+                    gpu.Begin();
+                    gpu.Dispatch("attention_query_grouped_half", p, (uint)rows * 1024, 128, q, qhalf);
+                    gpu.Dispatch2D("attention_online_q32_k256_s8_g8_r1", p, (uint)((rows * 8 + 31) / 32 * 256), 2, 256, qhalf, kh, vh, gate, alias);
+                    gpu.End();
+                    if (!alias.Values<float>(rows * 4096).SequenceEqual(output.Values<float>(rows * 4096))) throw new Exception($"Original online attention mismatch: {variant}");
+                }
                 q.Values<float>(rows * 4096).CopyTo(alias.Values<float>(rows * 4096)); alias.Values<float>(rows * 4096 + 1)[rows * 4096] = float.NaN;
                 Encode(alias, alias);
                 if (!alias.Values<float>(rows * 4096).SequenceEqual(output.Values<float>(rows * 4096))) throw new Exception($"Alias mismatch: {variant}");
@@ -59,7 +69,7 @@ internal static class OnlineAttentionTests
                 for (int run = 0; run < runs; run++)
                 {
                     gpu.ResetWallTiming(); var watch = Stopwatch.StartNew(); Encode(q, output); double wall = watch.Elapsed.TotalMilliseconds;
-                    Console.WriteLine(JsonSerializer.Serialize(new { type = "online_attention", history, rows, stress, kv_cache_precision = halfKv ? "fp16" : "fp32", variant, path = bq == 0 ? "causal-device" : "online", bq, bk, sg, g, run, wall_ms = wall, timing = gpu.ReadWallTiming(), max_abs_error = error, alias_check = "passed", guards = "passed" }));
+                    Console.WriteLine(JsonSerializer.Serialize(new { type = "online_attention", history, rows, stress, kv_cache_precision = halfKv ? "fp16" : "fp32", variant, path = bq == 0 ? "causal-device" : "online", bq, bk, sg, g, run, wall_ms = wall, timing = gpu.ReadWallTiming(), max_abs_error = error, original_bitwise_check = compareOriginal ? "passed" : "not-applicable", alias_check = "passed", guards = "passed" }));
                 }
             }
         }

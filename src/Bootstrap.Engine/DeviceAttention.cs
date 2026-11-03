@@ -58,7 +58,7 @@ internal sealed class DeviceAttentionWorkspace(Metal gpu) : IDisposable
             gpu.Dispatch("attention_input_half", convert, (uint)length * 128, 128, k, key!);
             gpu.Dispatch("attention_input_half", convert, (uint)length * 128, 128, v, value!);
         }
-        gpu.Dispatch2D($"attention_online_q32_k256_s8_g{heads}_r1", p, (uint)((rows * heads + 31) / 32) * 256, (uint)(16 / heads), 256,
+        gpu.Dispatch2D("attention_online_q32_k256_s8_g8_r2", p, (uint)((rows * heads + 31) / 32) * 256, (uint)(16 / heads), 256,
             query!, halfKv ? k : key!, halfKv ? v : value!, gate, output);
     }
     public void Dispose() { query?.Dispose(); key?.Dispose(); value?.Dispose(); probability?.Dispose(); }

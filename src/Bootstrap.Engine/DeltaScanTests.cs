@@ -62,7 +62,7 @@ internal static class DeltaScanTests
                 state.Values<float>(stateCount + 1)[stateCount] = float.NaN;
                 y.Values<float>(m * 4096 + 1).Fill(float.NaN);
             }
-            string[] variants = ["baseline", "gates", "delta_direct8", "delta_staged8", "delta_staged16"];
+            string[] variants = ["baseline", "gates", "delta_direct8", "delta_staged8_reference", "delta_staged8", "delta_staged16"];
             Reset(); Encode("baseline");
             float[] reference = y.Values<float>(m * 4096).ToArray(), referenceState = state.Values<float>(stateCount).ToArray();
             // Independent double recurrence, including nonzero incoming state.
@@ -84,12 +84,16 @@ internal static class DeltaScanTests
                 }
                 for (int c = 0; c < 128; c++) Check(referenceState[(h * 128 + d) * 128 + c], cells[c]);
             }
+            Reset(); Encode("delta_staged8_reference");
+            float[] originalStaged = y.Values<float>(m * 4096).ToArray(), originalStagedState = state.Values<float>(stateCount).ToArray();
             foreach (string variant in variants)
             {
                 Reset(); Encode(variant);
                 double worst = 0;
                 for (int i = 0; i < reference.Length; i++) worst = Math.Max(worst, Check(y.Values<float>(reference.Length)[i], reference[i]));
                 for (int i = 0; i < stateCount; i++) worst = Math.Max(worst, Check(state.Values<float>(stateCount)[i], referenceState[i]));
+                if (variant == "delta_staged8" && (!y.Values<float>(m * 4096).SequenceEqual(originalStaged) || !state.Values<float>(stateCount).SequenceEqual(originalStagedState)))
+                    throw new Exception("Prefetched DeltaNet differs from original staged recurrence");
                 if (!float.IsNaN(y.Values<float>(m * 4096 + 1)[m * 4096]) || !float.IsNaN(state.Values<float>(stateCount + 1)[stateCount])) throw new Exception("Delta guard overwritten");
                 // Splitting a chunk must carry the same state, including a tail.
                 if (m > 1)
