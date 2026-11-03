@@ -66,7 +66,7 @@ internal sealed partial class QwenEngine
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
         var timer = Stopwatch.StartNew();
         var tokens = Tokenizer.SimpleChat(prompt);
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", kv_cache_precision = KvCachePrecision, fp32_tensorops = Fp32TensorOps, projection_precision = TensorOpsPrecision, delta_mode = DeltaMode, expert_kernel = ExpertKernel, parallel_expert_routing = ParallelExpertRouting, attention_mode = AttentionMode, wide_prefill = WidePrefill, prompt_tokens = tokens.Length,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", packed_experts = PackedExperts, affine8 = Affine8, kv_cache_precision = KvCachePrecision, fp32_tensorops = Fp32TensorOps, projection_precision = TensorOpsPrecision, delta_mode = DeltaMode, expert_kernel = ExpertKernel, parallel_expert_routing = ParallelExpertRouting, attention_mode = AttentionMode, wide_prefill = WidePrefill, prompt_tokens = tokens.Length,
             tokenizer_wall_ms = timer.Elapsed.TotalMilliseconds, context_window = ContextWindow,
             prefix_caching = PrefixCachingEnabled, draft_enabled = draft is not null,
             sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))) }));
@@ -77,6 +77,7 @@ internal sealed partial class QwenEngine
             bool samples = run == runs + 1;
             ClearPrefixCache();
             gpu.ResetWallTiming(samples, samples && allKernels);
+            var started = DateTimeOffset.UtcNow;
             var cpu = process.TotalProcessorTime;
             timer.Restart();
             var result = Generate(tokens, 1, true);
@@ -85,7 +86,7 @@ internal sealed partial class QwenEngine
             int first = result.Tokens[0];
             if (expected is not null && first != expected) throw new Exception("Profiling changed first-token output");
             expected = first;
-            Console.WriteLine(JsonSerializer.Serialize(new { type = "prefill", run,
+            Console.WriteLine(JsonSerializer.Serialize(new { type = "prefill", run, started_utc = started, completed_utc = DateTimeOffset.UtcNow,
                 mode = samples ? (allKernels ? "all_kernel_encoder_counters" : "attention_encoder_counters") : run == 0 ? "cold_first_run" : "warm_uncached",
                 wall_ms = wall, process_cpu_ms = cpuMs, prompt_tokens = tokens.Length,
                 tokens_per_second = tokens.Length / (wall / 1000), first_token = first,

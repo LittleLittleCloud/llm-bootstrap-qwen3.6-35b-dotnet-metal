@@ -100,7 +100,7 @@ internal sealed partial class QwenEngine
     void BatchProject(string name, GpuBuffer input, GpuBuffer output, int count)
     {
         var tensor = weights[name + ".weight"];
-        var scales = tensor.Kind == 0 ? weights[name + ".weight_scale_inv"].Binding : (Binding)dummy;
+        var scales = tensor.Kind is 0 or 3 ? weights[name + ".weight_scale_inv"].Binding : (Binding)dummy;
         if (count <= VerificationCapacity)
         {
             gpu.Dispatch("matrix_product_tiny", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, (uint)tensor.Shape[0] * 32, 128, input, tensor.Binding, scales, output);
@@ -141,7 +141,7 @@ internal sealed partial class QwenEngine
         }
         if (!verify && (AttentionMode is "fp16-device" or "fp16-online")) { deviceAttention ??= new(gpu); deviceAttention.Prepare(count, position + count, HalfKv, AttentionMode == "fp16-online"); }
         gpu.Begin();
-        gpu.Dispatch("batch_embedding", new() { M = (uint)count }, checked((uint)count * Hidden), 128, weights["model.language_model.embed_tokens.weight"].Binding, b.Tokens, b.Hidden);
+        BatchEmbed(b.Tokens, b.Hidden, count);
         for (int layer = 0; layer < 40; layer++)
         {
             string prefix = Prefix(layer); Normalize(b.Hidden, prefix + ".input_layernorm", b.Norm, Hidden, (uint)count);
@@ -253,8 +253,8 @@ internal sealed partial class QwenEngine
                 gpu.Dispatch("expert_input_half", p, p.M * Hidden / 4, 128, b.Norm, b.SortedTokens, b.PackedExpertInputs);
                 // The activation buffer is deliberately FP16 on this path. Down reads
                 // it directly; no global gate/up outputs or activation repack needed.
-                gpu.Dispatch2D(PackedExperts ? "ablation_gate_up_packed" : "expert_gate_up_staged", p, 16 * 64, tileLimit, 64, b.PackedExpertInputs, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertActivation);
-                gpu.Dispatch2D(PackedExperts ? "ablation_matrix_packed" : "expert_matrix_staged", new() { N = Hidden, K = 512, Kind = 2 }, (Hidden / 64) * 64, tileLimit, 64, b.ExpertActivation, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertOutput);
+                gpu.Dispatch2D(Affine8 ? "expert_gate_up_affine" : PackedExperts ? "ablation_gate_up_packed" : "expert_gate_up_staged", p, 16 * 64, tileLimit, 64, b.PackedExpertInputs, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertActivation);
+                gpu.Dispatch2D(Affine8 ? "expert_matrix_affine" : PackedExperts ? "ablation_matrix_packed" : "expert_matrix_staged", new() { N = Hidden, K = 512, Kind = 2 }, (Hidden / 64) * 64, tileLimit, 64, b.ExpertActivation, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertOutput);
             } else {
                 ExpertProjection(0, 512, Hidden, b.Norm, b.ExpertGate); ExpertProjection(1, 512, Hidden, b.Norm, b.ExpertUp);
                 gpu.Dispatch("silu_product", new() { N = checked((uint)count * 8 * 512) }, checked((uint)count * 8 * 512), 128, b.ExpertGate, b.ExpertUp, b.ExpertActivation);

@@ -29,17 +29,20 @@ inline float4 f8x4(uchar4 bytes) {
     return select(select(normal,subnormal,e==0),float4(NAN),(e==15)&(m==7));
 }
 inline float4 weight4(device const uchar*w,device const ushort*s,uint row,uint col,uint cols,uint kind) {
+    if(kind==3){ushort2 sb=((device const ushort2*)s)[row*(cols/64)+col/64];return fma(float4(*((device const uchar4*)(w+row*cols+col))),float4(bf(sb.x)),float4(bf(sb.y)));}
     if(kind==0)return f8x4(*((device const uchar4*)(w+row*cols+col)))*bf(s[(row/128)*((cols+127)/128)+col/128]);
     if(kind==1){ushort4 bits=*((device const ushort4*)((device const ushort*)w+row*cols+col));return as_type<float4>(uint4(bits)<<16);}
     device const float* p=(device const float*)w+row*cols+col;return float4(p[0],p[1],p[2],p[3]);
 }
 inline float weight(device const uchar *w,device const ushort *s,uint row,uint col,uint cols,uint kind) {
+    if(kind==3){ushort2 sb=((device const ushort2*)s)[row*(cols/64)+col/64];return fma(float(w[row*cols+col]),bf(sb.x),bf(sb.y));}
     if(kind==0)return f8(w[row*cols+col])*bf(s[(row/128)*((cols+127)/128)+col/128]);
     if(kind==1)return bf(((device const ushort*)w)[row*cols+col]);
     return ((device const float*)w)[row*cols+col];
 }
 kernel void fp8_values(device const uchar *x [[buffer(0)]],device float *y [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=f8(x[i]);}
 kernel void embedding(device const ushort*w [[buffer(0)]],device float*y [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=bf(w[p.pos*p.n+i]);}
+kernel void embedding_affine(device const uchar*w [[buffer(0)]],device float*y [[buffer(1)]],device const ushort*s [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=weight(w,s,p.pos,i,p.n,3);}
 kernel void gemv(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
     uint row=g/32;if(row>=p.n)return;float4 accum=0;
     for(uint j=lane*4;j<p.k;j+=128)accum+=*((device const float4*)(x+j))*weight4(w,s,row,j,p.k,p.kind);
@@ -75,6 +78,7 @@ kernel void router(device const float*x [[buffer(0)]],device int*ids [[buffer(1)
 inline float4 expert_weight4(device const uchar*w,device const ushort*s,uint row,uint col,uint k,uint flags){
     if(!(flags&1024))return weight4(w,s,row,col,k,0);
     uint at=(row/32)*k*32+(col/32)*1024+((col%32)/4)*128+(row%32)*4;
+    if(flags&2048){ushort2 sb=((device const ushort2*)s)[(row/32)*(k/64)*32+(col/64)*32+row%32];return fma(float4(*((device const uchar4*)(w+at))),float4(bf(sb.x)),float4(bf(sb.y)));}
     return f8x4(*((device const uchar4*)(w+at)))*bf(s[(row/128)*(k/128)+col/128]);
 }
 kernel void expert_gate_up(device const float*x [[buffer(0)]],device const uchar*raw [[buffer(1)]],device const Expert*experts [[buffer(2)]],device const int*ids [[buffer(3)]],device float*y [[buffer(4)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
@@ -131,6 +135,7 @@ kernel void argmax(device const float*x [[buffer(0)]],device int*out [[buffer(1)
 // accumulators are float32. The original single-token path remains for decode.
 struct ExpertTile { uint expert,first,count,pad; };
 kernel void batch_embedding(device const ushort*w [[buffer(0)]],device const int*tokens [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.m*2048)y[i]=bf(w[uint(tokens[i/2048])*2048+i%2048]);}
+kernel void batch_embedding_affine(device const uchar*w [[buffer(0)]],device const int*tokens [[buffer(1)]],device float*y [[buffer(2)]],device const ushort*s [[buffer(3)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.m*2048)y[i]=weight(w,s,uint(tokens[i/2048]),i%2048,2048,3);}
 
 kernel void matrix_product_small(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
     threadgroup float xt[16*33],wt[32*33],result[16*33];
@@ -1432,6 +1437,29 @@ __attribute__((noinline)) void expert_ablation_tiny(device half*x,device const u
         if(sid==1)for(uint r=0;r<t.count;r++)((device half*)y)[(t.first+r)*p.n+column]=half(silu(float(gate[r*32+lane]))*out[r]);
     }else for(uint r=0;r<t.count;r++){uint at=(t.first+r)*p.n+column;if constexpr(Options&2)((device half*)y)[at]=half(out[r]);else y[at]=out[r];}
 }
+// Affine-8 uses the same TensorOps geometry as packed FP8. Metadata and byte
+// loads are contiguous across lanes; one scale/bias pair covers two K32 steps.
+template<int Rows, class Acc>
+inline void expert_affine_accumulate(device half*x,device const uchar*w,device const ushort*s,
+    uint k,uint n,uint firstColumn,uint live,uint lane,threadgroup half*stage,thread Acc &acc) {
+    constexpr auto desc=matmul2d_descriptor(Rows,32,32,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<1>> op;
+    auto full=tensor(x,dextents<int,2>{int(k),int(live)},array<int,2>{1,int(k)});
+    auto b=tensor(stage,extents<int,32,32>{},array<int,2>{1,32});
+    uint row=firstColumn+lane;float scale=0,bias=0;
+    for(uint block=0;block<k;block+=32){
+        if(row<n&&block%64==0){ushort2 sb=((device const ushort2*)s)[(row/32)*(k/64)*32+(block/64)*32+row%32];scale=bf(sb.x);bias=bf(sb.y);}
+        for(uint j=0;j<8;j++){
+            half4 value=half4(0);
+            if(row<n){uchar4 code=*((device const uchar4*)(w+expert_byte_offset<2>(row,block+j*4,k)));value=half4(fma(float4(code),float4(scale),float4(bias)));}
+            *((threadgroup half4*)(stage+lane*32+j*4))=value;
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        auto a=full.slice<32,Rows>(int(block),0);op.run(a,b,acc);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
 template<int Rows, int KS, bool Prefetch, int Layout, int Options, class Acc>
 inline void expert_ablation_accumulate(device half*x,device const uchar*w,device const ushort*s,
     uint k,uint n,uint firstColumn,uint live,uint lane,threadgroup half*stage,thread Acc &acc) {
@@ -1475,7 +1503,8 @@ inline void expert_ablation_run(device half*x,device const uchar*raw,device cons
     auto b=tensor(stage,extents<int,KS,32>{},array<int,2>{1,KS});
     auto acc=op.template get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
     for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
-    expert_ablation_accumulate<Rows,KS,Prefetch,Layout,Options>(x+tile.first*p.k,raw+wo,(device const ushort*)(raw+so),p.k,p.n,column,tile.count,lane,stage+sid*64*KS,acc);
+    if constexpr(Layout==4)expert_affine_accumulate<Rows>(x+tile.first*p.k,raw+wo,(device const ushort*)(raw+so),p.k,p.n,column,tile.count,lane,stage+sid*64*KS,acc);
+    else expert_ablation_accumulate<Rows,KS,Prefetch,Layout,Options>(x+tile.first*p.k,raw+wo,(device const ushort*)(raw+so),p.k,p.n,column,tile.count,lane,stage+sid*64*KS,acc);
     if constexpr(Fused){
         using Gate=typename conditional<(Options&1)!=0,half,float>::type;
         threadgroup Gate*gate=(threadgroup Gate*)stage;
@@ -1505,6 +1534,8 @@ template [[host_name("ablation_matrix_half")]] kernel decltype(expert_ablation<f
 template [[host_name("ablation_gate_up_scale")]] kernel decltype(expert_ablation<false,true,32,0,8>) expert_ablation<false,true,32,0,8>;
 template [[host_name("ablation_matrix_scale")]] kernel decltype(expert_ablation<false,false,32,0,8>) expert_ablation<false,false,32,0,8>;
 template [[host_name("ablation_gate_up_packed")]] kernel decltype(expert_ablation<false,true,32,2,8>) expert_ablation<false,true,32,2,8>;
+template [[host_name("expert_gate_up_affine")]] kernel decltype(expert_ablation<false,true,32,4,0>) expert_ablation<false,true,32,4,0>;
+template [[host_name("expert_matrix_affine")]] kernel decltype(expert_ablation<false,false,32,4,0>) expert_ablation<false,false,32,4,0>;
 template [[host_name("ablation_matrix_packed")]] kernel decltype(expert_ablation<false,false,32,2,8>) expert_ablation<false,false,32,2,8>;
 template [[host_name("ablation_gate_up_metadata")]] kernel decltype(expert_ablation<false,true,32,3,8>) expert_ablation<false,true,32,3,8>;
 template [[host_name("ablation_matrix_metadata")]] kernel decltype(expert_ablation<false,false,32,3,8>) expert_ablation<false,false,32,3,8>;

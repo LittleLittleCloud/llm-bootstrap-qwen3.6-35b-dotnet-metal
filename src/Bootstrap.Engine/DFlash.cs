@@ -30,7 +30,8 @@ internal sealed partial class QwenEngine
     }
 
     // All draft weights stay BF16; activations stay FP32; cached KV follows the engine cache precision. The target
-    // embedding and output head are shared, without another copy or quantization.
+    // Embedding and output head share the target's selected storage format;
+    // the pinned draft's own weights remain BF16.
     sealed class DFlashDraft : IDisposable
     {
         public const int Window = 2048, ContextFloats = Window * Hidden;
@@ -116,7 +117,7 @@ internal sealed partial class QwenEngine
             if (position != contextEnd || count is < 2 or > 8) throw new InvalidOperationException("Draft context/position mismatch");
             var tokenValues = tokens.Values<int>(count); tokenValues.Fill(248077); tokenValues[0] = anchor;
             e.gpu.Begin();
-            e.gpu.Dispatch("batch_embedding", new() { M = (uint)count }, (uint)(count * Hidden), 128, e.weights["model.language_model.embed_tokens.weight"].Binding, tokens, hidden);
+            e.BatchEmbed(tokens, hidden, count);
             for (int layer = 0; layer < 6; layer++)
             {
                 string path = $"layers.{layer}";

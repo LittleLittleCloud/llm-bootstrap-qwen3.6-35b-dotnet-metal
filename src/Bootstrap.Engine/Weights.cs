@@ -7,7 +7,7 @@ namespace Bootstrap.Engine;
 internal sealed record Tensor(GpuBuffer Storage, ulong Offset, string Dtype, int[] Shape)
 {
     public Binding Binding => new(Storage, Offset);
-    public uint Kind => Dtype switch { "F8_E4M3" => 0, "BF16" => 1, "F32" => 2, _ => throw new NotSupportedException("Unsupported tensor dtype " + Dtype) };
+    public uint Kind => Dtype switch { "F8_E4M3" => 0, "BF16" => 1, "F32" => 2, "AFFINE8" => 3, _ => throw new NotSupportedException("Unsupported tensor dtype " + Dtype) };
 }
 
 internal sealed class Checkpoint : IDisposable
@@ -17,8 +17,20 @@ internal sealed class Checkpoint : IDisposable
     public Tensor this[string key] => tensors.TryGetValue(key, out var value) ? value : throw new InvalidDataException("Missing checkpoint tensor: " + key);
     public bool Contains(string key) => tensors.ContainsKey(key);
     public GpuBuffer Shard(string name) => files[name];
-    public Checkpoint(Metal device, string directory, string manifestPath, bool packedExperts = false)
+    public Checkpoint(Metal device, string directory, string manifestPath, bool packedExperts = false, string? affineCache = null)
     {
+        if (affineCache is not null)
+        {
+            var cache = AffineWeights.ReadManifest(affineCache, manifestPath);
+            foreach (var entry in cache.Files)
+            {
+                string path = Path.Combine(affineCache, entry.Name);
+                if (new FileInfo(path).Length != entry.Bytes || AffineWeights.Hash(path) != entry.Sha256) throw new InvalidDataException("Affine cache hash mismatch: " + entry.Name);
+                Load(device, path, entry.Name, false, true);
+                Console.Error.WriteLine("Verified and mapped affine cache " + entry.Name);
+            }
+            return;
+        }
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         foreach (var entry in manifest.RootElement.GetProperty("files").EnumerateArray())
         {
@@ -34,7 +46,7 @@ internal sealed class Checkpoint : IDisposable
             Console.Error.WriteLine("Verified and mapped " + name);
         }
     }
-    void Load(Metal device, string path, string name, bool packedExperts)
+    void Load(Metal device, string path, string name, bool packedExperts, bool affine = false)
     {
         using var file = File.OpenRead(path);
         Span<byte> size = stackalloc byte[8]; file.ReadExactly(size);
@@ -43,6 +55,7 @@ internal sealed class Checkpoint : IDisposable
         byte[] header = new byte[checked((int)headerSize)]; file.ReadExactly(header);
         var storage = device.MapFile(path); files.Add(name, storage);
         using var json = JsonDocument.Parse(header);
+        if (affine && json.RootElement.GetProperty("__metadata__").GetProperty("format").GetString() != AffineWeights.Format) throw new InvalidDataException("Unexpected affine format");
         foreach (var property in json.RootElement.EnumerateObject())
         {
             if (property.Name == "__metadata__") continue;
@@ -50,7 +63,16 @@ internal sealed class Checkpoint : IDisposable
             var offsets = value.GetProperty("data_offsets").EnumerateArray().Select(x => x.GetUInt64()).ToArray();
             if (offsets.Length != 2 || offsets[1] < offsets[0] || 8 + headerSize + offsets[1] > (ulong)file.Length) throw new InvalidDataException("Invalid tensor offsets");
             var shape = value.GetProperty("shape").EnumerateArray().Select(x => x.GetInt32()).ToArray();
-            tensors.Add(property.Name, new(storage, 8 + headerSize + offsets[0], value.GetProperty("dtype").GetString()!, shape));
+            string dtype = value.GetProperty("dtype").GetString()!;
+            if (affine && dtype == "U8")
+            {
+                if (shape.Length != 2 || shape[1] % 64 != 0 || offsets[1] - offsets[0] != checked((ulong)shape[0] * (ulong)shape[1])) throw new InvalidDataException("Invalid affine matrix");
+                var metadata = json.RootElement.GetProperty(property.Name + "_scale_inv");
+                var metaShape = metadata.GetProperty("shape").EnumerateArray().Select(x => x.GetInt32()).ToArray();
+                if (metadata.GetProperty("dtype").GetString() != "BF16" || !metaShape.SequenceEqual(new[] { shape[0], shape[1] / 64, 2 })) throw new InvalidDataException("Invalid affine scale/bias");
+                dtype = "AFFINE8";
+            }
+            tensors.Add(property.Name, new(storage, 8 + headerSize + offsets[0], dtype, shape));
             if (packedExperts && property.Name.Contains(".mlp.experts.", StringComparison.Ordinal) && property.Name.EndsWith(".weight", StringComparison.Ordinal))
             {
                 if (value.GetProperty("dtype").GetString() != "F8_E4M3" || shape.Length != 2 || shape[0] % 32 != 0 || shape[1] % 32 != 0
