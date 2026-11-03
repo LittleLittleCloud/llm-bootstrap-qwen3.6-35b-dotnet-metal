@@ -128,12 +128,7 @@ internal sealed partial class QwenEngine
             gpu.Dispatch("matrix_product_tiny", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, (uint)tensor.Shape[0] * 32, 128, input, tensor.Binding, scales, output);
             return;
         }
-        if (FastSmallProjections && tensor.Shape[0] == 1)
-        {
-            gpu.Dispatch("matrix_product_scalar_fp16", new() { N = 1, M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, (uint)count * 32, 128, input, tensor.Binding, scales, output);
-            return;
-        }
-        if (PredecodedProjections && TensorOpsPrecision == "fp16" && (tensor.Shape[0] > 32 || (FastSmallProjections && tensor.Shape[0] == 32)))
+        if (PredecodedProjections && TensorOpsPrecision == "fp16" && (tensor.Shape[0] > 32 || (FastSmallProjections && tensor.Shape[0] is 1 or 32)))
         {
             var b = batch!;
             b.PackedInputs ??= Buffer(b.Capacity * 8192 / 2);
@@ -302,8 +297,13 @@ internal sealed partial class QwenEngine
             // The routed expert path uses PackedExpertInputs, preserving the
             // Norm conversion made by the router projection in PackedInputs.
             BatchProject(prefix + ".mlp.shared_expert.gate_proj", b.Norm, b.SharedGate, count, reusePackedInput: stagedExperts); BatchProject(prefix + ".mlp.shared_expert.up_proj", b.Norm, b.SharedUp, count, reusePackedInput: true);
+            // Compute the scalar gate while packed Norm is still live. The down
+            // projection below repacks SharedActivation into this same scratch.
+            bool earlyScalar = FastSmallProjections && PredecodedProjections && count > VerificationCapacity;
+            if (earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, reusePackedInput: true);
             gpu.Dispatch("silu_product", new() { N = checked((uint)count * 512) }, checked((uint)count * 512), 128, b.SharedGate, b.SharedUp, b.SharedActivation);
-            BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count); BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count);
+            BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count);
+            if (!earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count);
             gpu.Dispatch("batch_mix", new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
             ActiveDraft?.Capture(layer, b.Hidden, count);
         }
