@@ -2,6 +2,17 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    string densePrefill = "baseline";
+    public string DensePrefill
+    {
+        get => densePrefill;
+        set {
+            if (value is not ("baseline" or "draft" or "small" or "all")) throw new ArgumentException("Invalid dense prefill mode");
+            if (densePrefill != value) { ClearPrefixCache(); densePrefill = value; }
+        }
+    }
+    bool FastDraftFc => TensorOpsPrecision == "fp16" && DensePrefill is "draft" or "all";
+    bool FastSmallProjections => TensorOpsPrecision == "fp16" && DensePrefill is "small" or "all";
     string deltaMode = "baseline";
     public bool ValidateDelta { get; set; }
     string deltaPreparation = "baseline";
@@ -117,7 +128,12 @@ internal sealed partial class QwenEngine
             gpu.Dispatch("matrix_product_tiny", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, (uint)tensor.Shape[0] * 32, 128, input, tensor.Binding, scales, output);
             return;
         }
-        if (PredecodedProjections && TensorOpsPrecision == "fp16" && tensor.Shape[0] > 32)
+        if (FastSmallProjections && tensor.Shape[0] == 1)
+        {
+            gpu.Dispatch("matrix_product_scalar_fp16", new() { N = 1, M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, (uint)count * 32, 128, input, tensor.Binding, scales, output);
+            return;
+        }
+        if (PredecodedProjections && TensorOpsPrecision == "fp16" && (tensor.Shape[0] > 32 || (FastSmallProjections && tensor.Shape[0] == 32)))
         {
             var b = batch!;
             b.PackedInputs ??= Buffer(b.Capacity * 8192 / 2);
@@ -159,7 +175,9 @@ internal sealed partial class QwenEngine
             if ((layer + 1) % 4 != 0)
             {
                 string path = prefix + ".linear_attn";
-                BatchProject(path + ".in_proj_qkv", b.Norm, b.Qkv, count); BatchProject(path + ".in_proj_z", b.Norm, b.Z, count, reusePackedInput: true); BatchProject(path + ".in_proj_a", b.Norm, b.A, count); BatchProject(path + ".in_proj_b", b.Norm, b.B, count);
+                BatchProject(path + ".in_proj_qkv", b.Norm, b.Qkv, count); BatchProject(path + ".in_proj_z", b.Norm, b.Z, count, reusePackedInput: true);
+                // qkv/z/a/b read the same unchanged Norm rows and K. No intervening pack.
+                BatchProject(path + ".in_proj_a", b.Norm, b.A, count, reusePackedInput: true); BatchProject(path + ".in_proj_b", b.Norm, b.B, count, reusePackedInput: true);
                 bool fusedPreparation = optimizedDelta && DeltaPreparation == "fused";
                 if (fusedPreparation)
                     gpu.Dispatch("delta_prepare_fused", new() { M = (uint)count }, (uint)count * 16 * 128, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv, b.Q, b.K, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, b.DeltaGates!);

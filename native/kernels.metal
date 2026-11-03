@@ -430,6 +430,14 @@ kernel void expert_matrix_mpp(device const float*x [[buffer(0)]],device const uc
 }
 
 
+// N=1 prefill is a batched dot product. Match the small kernel's FP16
+// operands, but avoid padding each scalar result to 32 output columns.
+kernel void matrix_product_scalar_fp16(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+    uint row=g/32;if(row>=p.m)return;float4 a=0;
+    for(uint j=lane*4;j<p.k;j+=128)a+=float4(half4(*((device const float4*)(x+row*p.k+j))))*float4(half4(weight4(w,s,0,j,p.k,p.kind)));
+    float sum=simd_sum(a.x+a.y+a.z+a.w);if(lane==0)y[row]=sum;
+}
+
 kernel void matrix_product_small_fp16(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
     threadgroup half xt[16*33],wt[32*33];
     threadgroup float result[16*33];

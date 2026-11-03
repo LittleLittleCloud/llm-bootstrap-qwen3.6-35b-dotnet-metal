@@ -21,7 +21,7 @@ internal sealed partial class QwenEngine
         foreach (string prompt in new[] { shortPrompt, longPrompt })
         {
             var tokens = Tokenizer.SimpleChat(prompt);
-            Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", prompt_tokens = tokens.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))), packed_experts = PackedExperts, delta_mode = DeltaMode, delta_preparation = DeltaPreparation }));
+            Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", prompt_tokens = tokens.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))), packed_experts = PackedExperts, delta_mode = DeltaMode, delta_preparation = DeltaPreparation, dense_prefill = DensePrefill }));
             int? first = null;
             for (int run = 0; run <= runs; run++)
             {

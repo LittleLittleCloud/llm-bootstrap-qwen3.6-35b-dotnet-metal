@@ -29,7 +29,9 @@ internal sealed partial class QwenEngine
         draft.ExportSyntheticFixture(directory, context);
     }
 
-    // All draft weights stay BF16; activations stay FP32; cached KV follows the engine cache precision. The target
+    // Draft checkpoint weights stay BF16; stored activations stay FP32. The optional
+    // prefill FC path rounds matrix operands to FP16, accumulating/outputting FP32.
+    // Cached KV follows the engine cache precision. The target
     // Embedding and output head share the target's selected storage format;
     // the pinned draft's own weights remain BF16.
     sealed class DFlashDraft : IDisposable
@@ -40,6 +42,7 @@ internal sealed partial class QwenEngine
         readonly Checkpoint weights;
         public readonly GpuBuffer Context;
         GpuBuffer features, projected;
+        GpuBuffer? packedFcInput, packedFcWeights;
         int featureCapacity = 512;
         readonly GpuBuffer contextInput, contextK, contextV;
         readonly GpuBuffer hidden, norm, prepared, dynamic, output, q, k, v, attention, scores, gate, up, activation, logits, selector, tokens, proposals;
@@ -66,6 +69,8 @@ internal sealed partial class QwenEngine
             if (count <= featureCapacity) return;
             features.Dispose(); projected.Dispose();
             features = e.Buffer(count * Hidden * 8); projected = e.Buffer(count * Hidden); featureCapacity = count;
+            // Resized lazily on the next optimized FC dispatch; tiny draft paths need no packing.
+            packedFcInput?.Dispose(); packedFcInput = null;
         }
         public void Capture(int layer, GpuBuffer source, int count)
         {
@@ -87,6 +92,18 @@ internal sealed partial class QwenEngine
             if (count <= VerificationCapacity)
             {
                 e.gpu.Dispatch("matrix_product_tiny", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = 1 }, (uint)tensor.Shape[0] * 32, 128, input, tensor.Binding, e.dummy, destination);
+                return;
+            }
+            if (name == "fc" && e.FastDraftFc)
+            {
+                int n = tensor.Shape[0], k = tensor.Shape[1];
+                packedFcInput ??= e.Buffer(checked(featureCapacity * k / 2));
+                packedFcWeights ??= e.Buffer(checked(n * k / 2));
+                var p = new KernelArgs { N = (uint)n, M = (uint)count, K = (uint)k, Kind = 1 };
+                // Reuse bounded scratch, keeping the BF16 checkpoint and complete context work.
+                e.gpu.Dispatch("projection_unpack_half", p, p.N * p.K / 4, 128, tensor.Binding, e.dummy, packedFcWeights);
+                e.gpu.Dispatch("projection_input_half", p, p.M * p.K / 4, 128, input, packedFcInput);
+                e.gpu.Dispatch2D("matrix_product_predecoded", p, ((p.N + 63) / 64) * 128, (p.M + 63) / 64, 128, packedFcInput, packedFcWeights, destination);
                 return;
             }
             e.gpu.Dispatch2D("matrix_product", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = 1 }, (uint)((tensor.Shape[0] + 63) / 64 * 256), (uint)((count + 31) / 32), 256, input, tensor.Binding, e.dummy, destination);
