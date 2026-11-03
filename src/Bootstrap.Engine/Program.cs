@@ -19,6 +19,7 @@ if (command == "profile-delta") { DeltaScanTests.Run(File.ReadAllText(kernelFile
 if (command == "profile-delta-prepare") { DeltaPrepareTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-dense-prefill") { DensePrefillTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--candidate-only")); return; }
 if (command == "profile-dense-tiles") { DenseTileTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
+if (command == "profile-mix") { MixTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-online-attention") { OnlineAttentionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), Option("--case"), Option("--variants"), args.Contains("--stress"), Option("--kv-cache-precision") != "fp32"); return; }
 if (command == "compare-mlx-kernels") { KernelComparisonBenchmarks.Run(File.ReadAllText(kernelFile), Option("--family") ?? "all", int.Parse(Option("--runs") ?? "9")); return; }
 if (command == "packed-experts-self-test") { PackedExpertTests.Run(File.ReadAllText(kernelFile)); return; }

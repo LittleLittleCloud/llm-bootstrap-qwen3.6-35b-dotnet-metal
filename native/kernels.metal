@@ -207,6 +207,14 @@ kernel void expert_matrix(device const float*x [[buffer(0)]],device const uchar*
 kernel void batch_mix(device const float*residual [[buffer(0)]],device const float*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*2048)return;uint token=i/2048,d=i%2048;float value=residual[i]+shared[i]*sigmoid(gate[token]);for(uint e=0;e<8;++e)value+=prob[token*8+e]*expert[inverse[token*8+e]*2048+d];y[i]=value;
 }
+// Four adjacent dimensions share routing metadata and the scalar shared gate.
+// Keep FP32 storage and the original left-to-right expert accumulation order.
+kernel void batch_mix_vec4(device const float4*residual [[buffer(0)]],device const float4*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float4*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float4*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i>=p.m*512)return;uint token=i/512,d=i%512;
+    float4 value=residual[i]+shared[i]*sigmoid(gate[token]);
+    for(uint e=0;e<8;++e)value+=prob[token*8+e]*expert[inverse[token*8+e]*512+d];
+    y[i]=value;
+}
 kernel void batch_conv(device const float*x [[buffer(0)]],device const ushort*w [[buffer(1)]],device float*state [[buffer(2)]],device float*y [[buffer(3)]],device float*tape [[buffer(4)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=8192)return;float s0=state[i],s1=state[8192+i],s2=state[16384+i],w0=bf(w[i*4]),w1=bf(w[i*4+1]),w2=bf(w[i*4+2]),w3=bf(w[i*4+3]);
     for(uint t=0;t<p.m;++t){float value=x[t*8192+i];y[t*8192+i]=silu(s0*w0+s1*w1+s2*w2+value*w3);s0=s1;s1=s2;s2=value;if(p.flags&1){tape[t*24576+i]=s0;tape[t*24576+8192+i]=s1;tape[t*24576+16384+i]=s2;}}state[i]=s0;state[8192+i]=s1;state[16384+i]=s2;
