@@ -760,3 +760,35 @@ Use the unmodified Splash revision documented in
 [the matched kernel comparison](docs/SPLASH_KERNEL_COMPARISON.md). The ablation
 runner reuses that harness but measures Bootstrap variants only. These are
 local development measurements, not official evaluator reports.
+
+## Packed expert cost profiling
+
+`profile-prefill` accepts `--long-prompt-file` to profile a second prompt in the
+same model process. It records packed-layout selection and UTC start/end times
+for correlation with external memory samples. Use `--runs 3 --all-kernels` for
+one cold, three ordinary warm, and one instrumented request per prompt. Loading
+is excluded; first-use residency costs remain visible in the cold request.
+
+`scripts/profile-expert-stages.py --splash /path/to/pinned/splash --out
+artifacts/packed-prefill-profile/stages --runs 5` generates isolated diagnostic
+shaders and measures alternative exact FP8 converters, double buffering, and
+K=64/128 TensorOps tiles against the original and packed K=32 kernels. Repeat
+with `--reverse`; use `--fixture broad --runs 0` for broad finite E4M3/scales.
+The diagnostic validates all 256 FP8 codes, including signed zero and NaNs, for
+both alternate converters. Production kernel source and runtime defaults are
+unchanged. These interventions measure optimization sensitivity, not additive
+conversion/load/barrier/TensorOps time components.
+
+See [PACKED_PREFILL_PROFILE.md](docs/PACKED_PREFILL_PROFILE.md) for the latest
+whole-model profile, memory evidence and controlled kernel measurements.
+
+For a controlled FP8-versus-affine comparison, use
+`scripts/compare-expert-quantization.py --splash /path/to/pinned/splash --out
+artifacts/expert-quantization-control --label forward --runs 5`, then repeat with
+`--label reverse --reverse`. Run correctness separately with
+`MTL_SHADER_VALIDATION=1` and `--label validation --varied-scales --runs 0`.
+The two formats decode to exactly the same synthetic weights; group-64 controls
+hold metadata layout/traffic, packed payload layout, TensorOps tiles, activation
+and output precision, grid, and safe math mode fixed. An unchanged packed kernel
+is timed alongside the generated variants. No checkpoint is requantized.
+See [EXPERT_QUANTIZATION_CONTROL.md](docs/EXPERT_QUANTIZATION_CONTROL.md).

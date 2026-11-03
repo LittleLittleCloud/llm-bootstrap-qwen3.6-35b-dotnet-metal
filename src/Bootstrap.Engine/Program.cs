@@ -79,7 +79,12 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         if (command == "compare-decode-variants") { engine.CompareDecodeVariants(int.Parse(Option("--runs") ?? "3")); return; }
         if (command == "compare-prefill-variants") { engine.ComparePrefillVariants(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required"), args.Contains("--fast-variants"), args.Contains("--projection-variants"), args.Contains("--batch-variants"), args.Contains("--tuned-variants"), args.Contains("--expert-variants"), args.Contains("--final-variants"), args.Contains("--throughput-variants"), args.Contains("--online-variants"), args.Contains("--moe-variants"), args.Contains("--moe-final-variants"), args.Contains("--delta-variants"), args.Contains("--delta-final-variants")); return; }
         if (command == "compare-tensorops") { engine.CompareTensorOps(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3")); return; }
-        if (command == "profile-prefill") { engine.ProfilePrefill(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), args.Contains("--all-kernels")); return; }
+        if (command == "profile-prefill") {
+            engine.ProfilePrefill(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), args.Contains("--all-kernels"));
+            if (Option("--long-prompt-file") is { } longer)
+                engine.ProfilePrefill(File.ReadAllText(longer), int.Parse(Option("--runs") ?? "3"), args.Contains("--all-kernels"));
+            return;
+        }
         if (command == "profile-decode") { engine.ProfileDecode(); return; }
         if (command == "draft-self-test") { engine.DraftSelfTest(Option("--output-dir") ?? throw new ArgumentException("--output-dir is required"), int.Parse(Option("--fixture-context") ?? "16")); return; }
         if (command == "verification-self-test") { engine.VerificationSelfTest(); return; }
