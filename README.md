@@ -195,6 +195,10 @@ dotnet src/Bootstrap.Engine/bin/Release/net10.0/Bootstrap.Engine.dll serve --mod
 The original .NET/Metal runtime executes the six-layer BF16 draft, sharing the
 unchanged target embedding and output head. Draft activations/KV, target KV,
 recurrent state and accumulation remain FP32; the official FP8 target is unchanged.
+With `--tuned-prefill`, KV storage is FP16 and the draft context FC now uses
+FP16 operands with FP32 accumulation/output. `--dense-prefill baseline` restores
+the earlier dense paths; `draft`, `small`, and `all` select the new paths for
+controlled comparisons. See [dense prefill implementation and checks](docs/DENSE_PREFILL.md).
 The draft uses projected features from eight target layers, noncausal sliding
 attention, grouped dynamic causal convolutions and the learned top-16 candidate
 selector. Each round proposes up to seven tokens after a verified anchor. The
