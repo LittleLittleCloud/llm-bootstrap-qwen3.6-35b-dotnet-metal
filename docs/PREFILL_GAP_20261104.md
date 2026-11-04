@@ -201,3 +201,45 @@ xcrun clang++ -std=c++20 -O3 -fobjc-arc -mmacosx-version-min=26.4 \
 python3 scripts/profile-dispatch-timeline.py --out artifacts/dispatch-timeline-repeat
 /tmp/qwen-prefill-plot-venv/bin/python scripts/render-dispatch-timeline.py artifacts/dispatch-timeline-repeat
 ```
+
+
+## Follow-up: fused affine matmul retest
+
+Retested the existing `dense_affine_pipeline` (K32) and `dense_affine_pipeline64` implementations at base `205c81e`, with additional diagnostic shapes covering the 30K fixture's 1259-row partial block and the GDN Z projection. No production shader, inference default, checkpoint or prefix policy changed. This tests the current TensorOps-based implementations; it is not a port of Splash's dense kernel and does not establish a limit on other fusion designs.
+
+Both paths consume the same affine-8 group-64 weights, FP16 activations and FP32 outputs. The baseline timing includes weight expansion plus matmul. The fused path expands weights inside each matmul tile. Kernel tests use deterministic random inputs and non-dyadic affine scale/bias values, compare every live output, verify guards, and sample independent CPU dot products using the baseline's rounded FP16 weights. Both K32 and K64 pass all 48 diagnostic checks in ordinary mode and again with Metal API/GPU validation; all reported full-output errors are zero. These checks also include the existing grouped/shared/attention fixtures. Build: zero warnings/errors.
+
+Five warm GPU-command measurements per path alternate order, excluding run zero:
+
+| M / N / K | Unpack + matmul, ms | Fused K32, ms | K32 change | Fused K64, ms | K64 change vs its own baseline |
+|---|---:|---:|---:|---:|---:|
+| 2048 / 8192 / 2048 | 2.3128 | 3.0264 | +30.9% | 3.1373 | +35.1% |
+| 2048 / 4096 / 2048 | 1.1570 | 1.5445 | +33.5% | 1.5786 | +36.6% |
+| 2048 / 2048 / 4096 | 1.2306 | 1.5979 | +29.8% | 1.6163 | +32.7% |
+| 2048 / 2048 / 512 | 0.1426 | 0.2428 | +70.2% | 0.2526 | +75.8% |
+| 1259 / 8192 / 2048 | 1.5179 | 1.9024 | +25.3% | 1.9669 | +30.4% |
+| 1259 / 2048 / 4096 | 0.7907 | 0.9480 | +19.9% | 1.0760 | +38.3% |
+| 1259 / 2048 / 512 | 0.0941 | 0.1509 | +60.3% | 0.1636 | +73.8% |
+
+K64 was run separately with its own alternating baseline; all baseline observations are retained in `micro.csv` and `summary.json`. The table's baseline column is the K32 process. Additional N=256/512 microbenchmarks also regress, but these are generic affine fixtures rather than an assertion that all such projections use affine weights or this kernel in the model.
+
+### Same-process 30K comparison
+
+The 29,939-token fixture is unchanged. Mask 29 is the current default. Mask 31 adds only bit 2, selecting K32 fused affine matmul for the single-projection path. Grouped projections, BF16 weight conversions, routed experts, draft behavior and the eight-token suffix remain unchanged. Both paths warm once, then run five times each in alternating order, clearing reusable prefixes before every request; no encoder counters or timeline collection is enabled.
+
+| Variant | Dispatches | Median wall, ms | Tokens/s | Median GPU command time, ms |
+|---|---:|---:|---:|---:|
+| Current unpack + matmul (29) | 16344 | 12679.002 | 2361.3 | 12607.407 |
+| Fused K32 single affine projections (31) | 14244 | 13403.450 | 2233.7 | 13334.857 |
+
+Fusing removes **2100 dispatches (12.849%)**, but median request latency increases **5.714%**. Every pair regresses: 611.847–765.740 ms extra, median paired increase 721.451 ms. The median CPU encoding time is 8.463 ms versus 8.163 ms; the regression is in GPU work. Each path retains exactly 39,939,244,032 bytes of Metal buffers, because other operations still need the existing scratch storage. All 12 requests, including warmups, return first token 22. This is a repeatability check, not a full generation-quality evaluation.
+
+This switch covers the **2100 individual affine expansions**, not the additional **750 grouped expansions** in the earlier 2850-dispatch estimate. No grouped fused-matmul implementation was added. The remaining 615 BF16-to-FP16 expansions are also untouched.
+
+Code inspection explains a likely source of the tradeoff: pre-expansion decodes each weight once per projection/chunk and feeds the existing device-resident TensorOps core. The current fused kernels decode again for each 128-row output tile (16 tiles at M=2048), with threadgroup staging and barriers. That avoids a scratch write and one dispatch, but changes both decoding reuse and the matmul schedule. Hardware counters were not collected to separate those costs, so this is an implementation-based explanation rather than an isolated causal measurement.
+
+Whole-machine new swap-outs total 641.5 MiB over model loading and initial warmup; no additional swap-outs appear after the last run-zero sample. All four micro/validation processes show zero new swap-outs. No thermal warnings were sampled. The first baseline warmup had 16444 dispatches because it also initialized 100 resident small weights; the reported warm runs have exactly 16344 versus 14244 dispatches.
+
+**Decision:** retain mask 29. The tested fused implementations are correctness-valid on these fixtures but slower, so dispatch reduction alone does not justify enabling bit 2. K64 was rejected on isolated measurements; only K32 was measured end to end.
+
+Local evidence: `artifacts/fused-dense-retest/` contains commands, binary/source hashes, logs, all observations, memory samples, `micro.csv`, `summary.json` and `evidence-manifest.json`. Production shader SHA-256 remains `e53803cf622ed53924948abfdb312547be985cc2d2da94e25027d49e77771812`. Reproduce with `dotnet build src/Bootstrap.Engine -c Release -o artifacts/fused-dense-bin`, then `python3 scripts/test-fused-dense.py` using a fresh output location (the script refuses to overwrite existing provenance). Summarize with `python3 scripts/summarize-fused-dense.py artifacts/fused-dense-retest`. The runner reuses the pinned model/fixture commands under `artifacts/current-gap/`; these local artifacts are prerequisites.
