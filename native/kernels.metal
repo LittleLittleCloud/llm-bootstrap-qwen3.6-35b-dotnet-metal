@@ -1714,3 +1714,26 @@ kernel void attention_prepare_fused(device const float*q [[buffer(0)]],device co
     if(query){packed[((h/8*p.m+row)*8+h%8)*256+tid]=half(z);gate[(row*16+h)*256+tid]=q[row*8192+h*512+256+tid];}
     else{uint at=(p.pos+row)*512+h*256+tid;kc[at]=half(z);vc[at]=half(v[row*512+h*256+tid]);}
 }
+// Four SIMD groups own independent 32-row slices and share a double-buffered
+// weight stage. Activations stay device-resident; no redundant X staging.
+kernel void dense_affine_pipeline(device half*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
+    threadgroup half stage[2*64*32];
+    constexpr auto desc=matmul2d_descriptor(32,64,32,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<1>> op;
+    auto full=tensor(x,dextents<int,2>{int(p.k),int(p.m)},array<int,2>{1,int(p.k)});
+    auto a0=full.slice<32,32>(0,int(group.y*128+sid*32));
+    auto b0=tensor(stage,extents<int,32,64>{},array<int,2>{1,32});auto b1=tensor(stage+64*32,extents<int,32,64>{},array<int,2>{1,32});
+    auto acc=op.get_destination_cooperative_tensor<decltype(a0),decltype(b0),float>();
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    // Each thread loads four vectors from a half-column. Next-step payload
+    // loads precede matmul, so they can overlap its work.
+    uint n=group.x*64+tid%64,offset=(tid/64)*16;uchar4 bytes[4];float scale=0,bias=0;
+    if(n<p.n){ushort2 sb=((device const ushort2*)s)[n*(p.k/64)];scale=bf(sb.x);bias=bf(sb.y);for(uint j=0;j<4;j++)bytes[j]=*((device const uchar4*)(w+n*p.k+offset+j*4));}
+    for(uint block=0;block<p.k;block+=32){uint buffer=(block/32)&1;
+        for(uint j=0;j<4;j++)*((threadgroup half4*)(stage+buffer*64*32+(tid%64)*32+offset+j*4))=n<p.n?half4(fma(float4(bytes[j]),float4(scale),float4(bias))):half4(0);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if(n<p.n&&block+32<p.k){for(uint j=0;j<4;j++)bytes[j]=*((device const uchar4*)(w+n*p.k+block+32+offset+j*4));if((block+32)%64==0){ushort2 sb=((device const ushort2*)s)[n*(p.k/64)+(block+32)/64];scale=bf(sb.x);bias=bf(sb.y);}}
+        if(group.y*128+sid*32<p.m){auto a=full.slice<32,32>(int(block),int(group.y*128+sid*32));if(buffer)op.run(a,b1,acc);else op.run(a,b0,acc);}
+    }
+    for(uint i=0;i<acc.get_capacity();++i){auto c=acc.get_multidimensional_index(i);uint r=group.y*128+sid*32+c[1],n=group.x*64+c[0];if(r<p.m&&n<p.n)y[r*p.n+n]=acc[i];}
+}

@@ -161,7 +161,7 @@ internal sealed partial class QwenEngine
             if (resident) packedWeight = residentProjections[name];
             else if (!staged) gpu.Dispatch("projection_unpack_half", p, p.N * p.K / 4, 128, tensor.Binding, scales, b.PackedWeights);
             if (packedInput is null && !reusePackedInput) gpu.Dispatch("projection_input_half", p, p.M * p.K / 4, 128, input, b.PackedInputs);
-            if (staged) gpu.Dispatch2D("dense_affine_staged", p, ((p.N + 63) / 64) * 128, (p.M + 63) / 64, 128, packedInput ?? b.PackedInputs, tensor.Binding, scales, output);
+            if (staged) gpu.Dispatch2D("dense_affine_pipeline", p, ((p.N + 63) / 64) * 128, (p.M + 127) / 128, 128, packedInput ?? b.PackedInputs, tensor.Binding, scales, output);
             else gpu.Dispatch2D("matrix_product_predecoded", p, ((p.N + 63) / 64) * 128, (p.M + 63) / 64, 128, packedInput ?? b.PackedInputs, packedWeight, output);
             return;
         }
