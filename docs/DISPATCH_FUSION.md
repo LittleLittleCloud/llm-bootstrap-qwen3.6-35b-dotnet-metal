@@ -81,7 +81,7 @@ Final microbenchmarks below are GPU command-buffer medians over five warm observ
 
 ### Correctness and resource observations
 
-- Release build: zero warnings/errors. All 44 kernel fixtures pass, also with Metal API/GPU validation. All compared FP32 outputs have zero measured error; packed query/KV/shared activation bits match. The packed-only shared path leaves the diagnostic FP32 destination untouched.
+- Release build: zero warnings/errors. All 44 kernel checks pass, also with Metal API/GPU validation. All compared FP32 outputs have zero measured error; packed query/KV/shared activation bits match. The packed-only shared path leaves the diagnostic FP32 destination untouched.
 - Full 10K/30K needle answers, three 256-token decode runs, 45 verifier checks and 48 prefix-cache checks pass. Smoke logits SHA-256 `5f85879f85492a1f7aa729069bd49b5df7ca8646cd4ddbfda2fdda56d4c720e2` is identical to the base.
 - Final extra retained allocation is 12,189,696 bytes (11.625 MiB): 7,995,392 bytes of small weights and a 4 MiB scratch increase. The paired comparisons retain identical allocations in both modes.
 - Whole-machine new swap-outs: preliminary 10K ablations 327.8125 MiB; preliminary 30K ablations zero; final paired comparison zero; full functional/profile checks 88.625 MiB. No thermal warnings were observed. Swap-outs are not attributed solely to the engine. The functional process retains additional verifier/cache buffers.
