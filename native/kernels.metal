@@ -1683,7 +1683,7 @@ kernel void shared_gate_up_pack(device half*x [[buffer(0)]],device half*wg [[buf
     auto ua=op.get_destination_cooperative_tensor<decltype(a),decltype(u),float>();
     for(uint i=0;i<ga.get_capacity();++i){ga[i]=0;ua[i]=0;}
     op.run(a,b,ga);op.run(a,u,ua);
-    for(uint i=0;i<ga.get_capacity();++i){auto c=ga.get_multidimensional_index(i);uint r=group.y*64+c[1],n=group.x*64+c[0];if(r<p.m&&n<p.n){float v=silu(ga[i])*ua[i];y[r*p.n+n]=v;packed[r*p.n+n]=half(v);}}
+    for(uint i=0;i<ga.get_capacity();++i){auto c=ga.get_multidimensional_index(i);uint r=group.y*64+c[1],n=group.x*64+c[0];if(r<p.m&&n<p.n){float v=silu(ga[i])*ua[i];if(p.flags&1)y[r*p.n+n]=v;packed[r*p.n+n]=half(v);}}
 }
 kernel void dense_affine_staged(device half*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
     threadgroup half xt[64*64],wt[64*64];

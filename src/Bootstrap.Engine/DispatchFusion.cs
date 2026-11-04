@@ -19,9 +19,9 @@ internal sealed partial class QwenEngine
         if (rows <= VerificationCapacity || TensorOpsPrecision != "fp16" || !PredecodedProjections) return;
         if ((DispatchFusion & 12) != 0 && multiWeights is null) {
             // Grow the existing projection scratch instead of retaining a second
-            // 48 MiB allocation. No command is active at this boundary.
+            // 36 MiB allocation. No command is active at this boundary.
             var previous = batch!.PackedWeights;
-            multiWeights = Buffer(12288 * Hidden / 2); batch.PackedWeights = multiWeights;
+            multiWeights = Buffer(9216 * Hidden / 2); batch.PackedWeights = multiWeights;
             if (previous is not null) { owned.Remove(previous); previous.Dispose(); }
         }
         // Routed expert down has consumed this buffer before shared projections.
@@ -65,7 +65,8 @@ internal sealed partial class QwenEngine
                 bindings.Add(i < ts.Length ? ts[i].Binding : dummy);
                 bindings.Add(i < ts.Length && ts[i].Kind is 0 or 3 ? weights[names[i] + ".weight_scale_inv"].Binding : dummy);
             }
-            bindings.Add(multiWeights!);
+            if ((ulong)(p.A + p.B + p.C) * p.K * 2 > multiWeights!.Length) throw new ArgumentException("Grouped projections exceed scratch workspace");
+            bindings.Add(multiWeights);
             gpu.Dispatch("projection_unpack_many", p, (p.A + p.B + p.C) * p.K / 4, 128, bindings.ToArray());
             packed[0] = multiWeights!; packed[1] = new(multiWeights!, (ulong)p.A * p.K * 2); packed[2] = new(multiWeights!, (ulong)(p.A + p.B) * p.K * 2);
         }

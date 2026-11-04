@@ -341,7 +341,7 @@ internal sealed partial class QwenEngine
             bool earlyScalar = FastSmallProjections && PredecodedProjections && count > VerificationCapacity;
             if (fusedShared || groupedShared) BatchProjectMany([prefix + ".mlp.shared_expert.gate_proj", prefix + ".mlp.shared_expert.up_proj"], [b.SharedGate, b.SharedUp], b.Norm, count, stagedExperts, fusedShared);
             else { BatchProject(prefix + ".mlp.shared_expert.gate_proj", b.Norm, b.SharedGate, count, reusePackedInput: stagedExperts); BatchProject(prefix + ".mlp.shared_expert.up_proj", b.Norm, b.SharedUp, count, reusePackedInput: true); }
-            if (earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, reusePackedInput: stagedExperts);
+            if (earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, reusePackedInput: true);
             if (!fusedShared) gpu.Dispatch("silu_product", new() { N = checked((uint)count * 512) }, checked((uint)count * 512), 128, b.SharedGate, b.SharedUp, b.SharedActivation);
             BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count, packedInput: fusedShared ? sharedPackedActivation : null);
             if (!earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count);

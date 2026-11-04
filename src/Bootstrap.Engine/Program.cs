@@ -19,7 +19,7 @@ if (command == "profile-delta") { DeltaScanTests.Run(File.ReadAllText(kernelFile
 if (command == "profile-delta-prepare") { DeltaPrepareTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-dense-prefill") { DensePrefillTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--candidate-only")); return; }
 if (command == "profile-dense-tiles") { DenseTileTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
-if (command == "test-dispatch-fusion") { DispatchFusionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "3")); return; }
+if (command == "test-dispatch-fusion") { DispatchFusionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "3"), Option("--dense-kernel") ?? "dense_affine_pipeline"); return; }
 if (command == "profile-projection-preparation") { ProjectionPreparationTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-mix") { MixTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-online-attention") { OnlineAttentionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), Option("--case"), Option("--variants"), args.Contains("--stress"), Option("--kv-cache-precision") != "fp32"); return; }
@@ -57,7 +57,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.DeltaPreparation = Option("--delta-preparation") ?? (tunedPrefill ? "fused" : "baseline");
         engine.DensePrefill = Option("--dense-prefill") ?? (tunedPrefill ? "all" : "baseline");
         engine.ProjectionPreparation = Option("--projection-preparation") ?? (tunedPrefill ? "fused" : "baseline");
-        engine.DispatchFusion = int.Parse(Option("--dispatch-fusion") ?? "0");
+        engine.DispatchFusion = int.Parse(Option("--dispatch-fusion") ?? (tunedPrefill && engine.Affine8 ? "29" : "0"));
         engine.ValidateDelta = args.Contains("--validate-delta");
         engine.ExpertKernel = Option("--expert-kernel") ?? (tunedPrefill ? "fused" : "baseline");
         engine.ParallelExpertRouting = args.Contains("--parallel-expert-routing") || (tunedPrefill && !args.Contains("--serial-expert-routing"));
