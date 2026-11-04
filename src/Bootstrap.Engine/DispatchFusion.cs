@@ -17,8 +17,16 @@ internal sealed partial class QwenEngine
     void PrepareDispatchFusion(int rows)
     {
         if (rows <= VerificationCapacity || TensorOpsPrecision != "fp16" || !PredecodedProjections) return;
-        if ((DispatchFusion & 12) != 0) multiWeights ??= Buffer(12288 * Hidden / 2);
-        if ((DispatchFusion & 8) != 0) sharedPackedActivation ??= Buffer(batch!.Capacity * 512 / 2);
+        if ((DispatchFusion & 12) != 0 && multiWeights is null) {
+            // Grow the existing projection scratch instead of retaining a second
+            // 48 MiB allocation. No command is active at this boundary.
+            var previous = batch!.PackedWeights;
+            multiWeights = Buffer(12288 * Hidden / 2); batch.PackedWeights = multiWeights;
+            if (previous is not null) { owned.Remove(previous); previous.Dispose(); }
+        }
+        // Routed expert down has consumed this buffer before shared projections.
+        // Its FP16 activation storage is dead until the next layer's expert path.
+        if ((DispatchFusion & 8) != 0) sharedPackedActivation = batch!.ExpertActivation;
         if ((DispatchFusion & 1) == 0 || residentProjections.Count != 0) return;
         gpu.Begin();
         for (int layer = 0; layer < 40; layer++) {

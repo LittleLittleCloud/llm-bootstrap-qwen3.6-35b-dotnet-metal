@@ -1737,3 +1737,25 @@ kernel void dense_affine_pipeline(device half*x [[buffer(0)]],device const uchar
     }
     for(uint i=0;i<acc.get_capacity();++i){auto c=acc.get_multidimensional_index(i);uint r=group.y*128+sid*32+c[1],n=group.x*64+c[0];if(r<p.m&&n<p.n)y[r*p.n+n]=acc[i];}
 }
+
+kernel void dense_affine_pipeline64(device half*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint sid [[simdgroup_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
+    threadgroup half stage[2*64*64];
+    constexpr auto desc=matmul2d_descriptor(32,64,64,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<1>> op;
+    auto full=tensor(x,dextents<int,2>{int(p.k),int(p.m)},array<int,2>{1,int(p.k)});
+    auto a0=full.slice<64,32>(0,int(group.y*128+sid*32));
+    auto b0=tensor(stage,extents<int,64,64>{},array<int,2>{1,64});auto b1=tensor(stage+64*64,extents<int,64,64>{},array<int,2>{1,64});
+    auto acc=op.get_destination_cooperative_tensor<decltype(a0),decltype(b0),float>();
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    // Each thread loads four vectors from a half-column. Next-step payload
+    // loads precede matmul, so they can overlap its work.
+    uint n=group.x*64+tid%64,offset=(tid/64)*32;uchar4 bytes[8];float scale=0,bias=0;
+    if(n<p.n){ushort2 sb=((device const ushort2*)s)[n*(p.k/64)];scale=bf(sb.x);bias=bf(sb.y);for(uint j=0;j<8;j++)bytes[j]=*((device const uchar4*)(w+n*p.k+offset+j*4));}
+    for(uint block=0;block<p.k;block+=64){uint buffer=(block/64)&1;
+        for(uint j=0;j<8;j++)*((threadgroup half4*)(stage+buffer*64*64+(tid%64)*64+offset+j*4))=n<p.n?half4(fma(float4(bytes[j]),float4(scale),float4(bias))):half4(0);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if(n<p.n&&block+64<p.k){for(uint j=0;j<8;j++)bytes[j]=*((device const uchar4*)(w+n*p.k+block+64+offset+j*4));if((block+64)%64==0){ushort2 sb=((device const ushort2*)s)[n*(p.k/64)+(block+64)/64];scale=bf(sb.x);bias=bf(sb.y);}}
+        if(group.y*128+sid*32<p.m){auto a=full.slice<64,32>(int(block),int(group.y*128+sid*32));if(buffer)op.run(a,b1,acc);else op.run(a,b0,acc);}
+    }
+    for(uint i=0;i<acc.get_capacity();++i){auto c=acc.get_multidimensional_index(i);uint r=group.y*128+sid*32+c[1],n=group.x*64+c[0];if(r<p.m&&n<p.n)y[r*p.n+n]=acc[i];}
+}
