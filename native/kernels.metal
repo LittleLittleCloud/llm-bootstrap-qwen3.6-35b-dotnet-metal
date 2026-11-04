@@ -1651,3 +1651,66 @@ kernel void expert_prepare_packed(device const uchar*raw [[buffer(0)]],device co
 kernel void expert_dispatch_args(device const uint*count [[buffer(0)]],device uint*args [[buffer(1)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]){
     if(i==0){args[0]=count[0];args[1]=p.n;args[2]=count[0];args[3]=1;}
 }
+
+// Dispatch reduction experiments. Precision and affine decoder match the
+// unpack -> FP16 TensorOps baseline; staged reduction can change FP32 rounding.
+kernel void projection_unpack_many(device const uchar*w0 [[buffer(0)]],device const ushort*s0 [[buffer(1)]],device const uchar*w1 [[buffer(2)]],device const ushort*s1 [[buffer(3)]],device const uchar*w2 [[buffer(4)]],device const ushort*s2 [[buffer(5)]],device half*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    uint at=i*4,row=at/p.k,col=at%p.k;if(row>=p.a+p.b+p.c)return;
+    float4 v=row<p.a?weight4(w0,s0,row,col,p.k,p.d):row<p.a+p.b?weight4(w1,s1,row-p.a,col,p.k,p.e):weight4(w2,s2,row-p.a-p.b,col,p.k,p.f);
+    *((device half4*)(y+at))=half4(v);
+}
+kernel void matrix_product_many(device half*x [[buffer(0)]],device half*w0 [[buffer(1)]],device half*w1 [[buffer(2)]],device half*w2 [[buffer(3)]],device float*y0 [[buffer(4)]],device float*y1 [[buffer(5)]],device float*y2 [[buffer(6)]],constant P&p [[buffer(15)]],uint3 group [[threadgroup_position_in_grid]]) {
+    uint g=group.x,n=p.a;device half*w=w0;device float*y=y0;
+    if(g>=(p.a+63)/64){g-=(p.a+63)/64;n=p.b;w=w1;y=y1;if(g>=(p.b+63)/64){g-=(p.b+63)/64;n=p.c;w=w2;y=y2;}}
+    constexpr auto desc=matmul2d_descriptor(64,64,dynamic_extent,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<4>> op;
+    auto left=tensor(x,dextents<int,2>{int(p.k),int(p.m)},array<int,2>{1,int(p.k)});
+    auto right=tensor(w,dextents<int,2>{int(p.k),int(n)},array<int,2>{1,int(p.k)});
+    auto output=tensor(y,dextents<int,2>{int(n),int(p.m)},array<int,2>{1,int(n)});
+    auto a=left.slice(0,int(group.y)*64);auto b=right.slice(0,int(g)*64);auto c=output.slice(int(g)*64,int(group.y)*64);
+    auto acc=op.get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    op.run(a,b,acc);acc.store(c);
+}
+kernel void shared_gate_up_pack(device half*x [[buffer(0)]],device half*wg [[buffer(1)]],device half*wu [[buffer(2)]],device float*y [[buffer(3)]],device half*packed [[buffer(4)]],constant P&p [[buffer(15)]],uint3 group [[threadgroup_position_in_grid]]) {
+    constexpr auto desc=matmul2d_descriptor(64,64,dynamic_extent,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<4>> op;
+    auto left=tensor(x,dextents<int,2>{int(p.k),int(p.m)},array<int,2>{1,int(p.k)});
+    auto gate=tensor(wg,dextents<int,2>{int(p.k),int(p.n)},array<int,2>{1,int(p.k)});
+    auto up=tensor(wu,dextents<int,2>{int(p.k),int(p.n)},array<int,2>{1,int(p.k)});
+    auto a=left.slice(0,int(group.y)*64);auto b=gate.slice(0,int(group.x)*64);auto u=up.slice(0,int(group.x)*64);
+    auto ga=op.get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
+    auto ua=op.get_destination_cooperative_tensor<decltype(a),decltype(u),float>();
+    for(uint i=0;i<ga.get_capacity();++i){ga[i]=0;ua[i]=0;}
+    op.run(a,b,ga);op.run(a,u,ua);
+    for(uint i=0;i<ga.get_capacity();++i){auto c=ga.get_multidimensional_index(i);uint r=group.y*64+c[1],n=group.x*64+c[0];if(r<p.m&&n<p.n){float v=silu(ga[i])*ua[i];y[r*p.n+n]=v;packed[r*p.n+n]=half(v);}}
+}
+kernel void dense_affine_staged(device half*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint3 group [[threadgroup_position_in_grid]]) {
+    threadgroup half xt[64*64],wt[64*64];
+    constexpr auto desc=matmul2d_descriptor(64,64,64,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<4>> op;
+    auto a=tensor(xt,extents<int,64,64>{},array<int,2>{1,64});auto b=tensor(wt,extents<int,64,64>{},array<int,2>{1,64});
+    auto acc=op.get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    for(uint block=0;block<p.k;block+=64){
+        for(uint i=tid;i<1024;i+=128){uint r=i/16,c=(i%16)*4,token=group.y*64+r,n=group.x*64+r;
+            *((threadgroup half4*)(xt+r*64+c))=token<p.m?*((device half4*)(x+token*p.k+block+c)):half4(0);
+            *((threadgroup half4*)(wt+r*64+c))=n<p.n?half4(weight4(w,s,n,block+c,p.k,p.kind)):half4(0);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);op.run(a,b,acc);threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for(uint i=0;i<acc.get_capacity();++i){auto c=acc.get_multidimensional_index(i);uint r=group.y*64+c[1],n=group.x*64+c[0];if(r<p.m&&n<p.n)y[r*p.n+n]=acc[i];}
+}
+// One group owns one Q or K head: the original 256-thread RMS reduction,
+// split Q gate, rotary transform, grouped FP16 Q and FP16 KV writes.
+kernel void attention_prepare_fused(device const float*q [[buffer(0)]],device const float*k [[buffer(1)]],device const float*v [[buffer(2)]],device const ushort*qw [[buffer(3)]],device const ushort*kw [[buffer(4)]],device half*packed [[buffer(5)]],device float*gate [[buffer(6)]],device half*kc [[buffer(7)]],device half*vc [[buffer(8)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint group [[threadgroup_position_in_grid]]) {
+    uint row=group/18,head=group%18;bool query=head<16;uint h=query?head:head-16;
+    float x=query?q[row*8192+h*512+tid]:k[row*512+h*256+tid];
+    threadgroup float sums[8],norm[256];threadgroup float inv;
+    float total=simd_sum(x*x);if((tid&31)==0)sums[tid/32]=total;threadgroup_barrier(mem_flags::mem_threadgroup);
+    total=tid<8?sums[tid]:0;total=simd_sum(total);if(tid==0)inv=rsqrt(total/256.0f+p.eps);threadgroup_barrier(mem_flags::mem_threadgroup);
+    norm[tid]=x*inv*(bf(query?qw[tid]:kw[tid])+1.0f);threadgroup_barrier(mem_flags::mem_threadgroup);
+    float z=norm[tid];if(tid<64){uint j=tid%32;float angle=float(p.pos+row)*pow(p.theta,-float(2*j)/64.0f),a=norm[j],b=norm[j+32];z=tid<32?a*cos(angle)-b*sin(angle):b*cos(angle)+a*sin(angle);}
+    if(query){packed[((h/8*p.m+row)*8+h%8)*256+tid]=half(z);gate[(row*16+h)*256+tid]=q[row*8192+h*512+256+tid];}
+    else{uint at=(p.pos+row)*512+h*256+tid;kc[at]=half(z);vc[at]=half(v[row*512+h*256+tid]);}
+}
