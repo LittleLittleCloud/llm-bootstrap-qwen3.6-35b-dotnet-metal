@@ -7,6 +7,24 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    public void CompareDispatchFusion(string prompt, int runs, int[] variants)
+    {
+        if (runs < 1 || variants.Length == 0) throw new ArgumentException("Missing comparison runs or variants");
+        var tokens = Tokenizer.SimpleChat(prompt); int original = DispatchFusion; int? first = null;
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "dispatch_fixture", prompt_tokens = tokens.Length, variants,
+            sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))) }));
+        try {
+            for (int run = 0; run <= runs; run++) foreach (int mode in run % 2 == 0 ? variants : variants.Reverse()) {
+                DispatchFusion = mode; ClearPrefixCache(); gpu.ResetWallTiming();
+                var watch = Stopwatch.StartNew(); var result = Generate(tokens, 1, true); double wall = watch.Elapsed.TotalMilliseconds;
+                if (first is not null && result.Tokens[0] != first) throw new Exception("Dispatch fusion first-token mismatch");
+                first = result.Tokens[0];
+                Console.WriteLine(JsonSerializer.Serialize(new { type = "dispatch_pair", run, variant = mode, prompt_tokens = tokens.Length,
+                    wall_ms = wall, first_token = first, metal_buffer_bytes = AllocatedBytes, timing = gpu.ReadWallTiming() }));
+            }
+        } finally { DispatchFusion = original; ClearPrefixCache(); }
+    }
+
     public void CompareProjectionPreparation(string prompt, int runs)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
@@ -90,7 +108,7 @@ internal sealed partial class QwenEngine
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
         var timer = Stopwatch.StartNew();
         var tokens = Tokenizer.SimpleChat(prompt);
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", packed_experts = PackedExperts, affine8 = Affine8, kv_cache_precision = KvCachePrecision, fp32_tensorops = Fp32TensorOps, projection_precision = TensorOpsPrecision, delta_mode = DeltaMode, delta_preparation = DeltaPreparation, dense_prefill = DensePrefill, projection_preparation = ProjectionPreparation, expert_kernel = ExpertKernel, parallel_expert_routing = ParallelExpertRouting, attention_mode = AttentionMode, wide_prefill = WidePrefill, prompt_tokens = tokens.Length,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", packed_experts = PackedExperts, affine8 = Affine8, kv_cache_precision = KvCachePrecision, fp32_tensorops = Fp32TensorOps, projection_precision = TensorOpsPrecision, delta_mode = DeltaMode, delta_preparation = DeltaPreparation, dense_prefill = DensePrefill, projection_preparation = ProjectionPreparation, dispatch_fusion = DispatchFusion, expert_kernel = ExpertKernel, parallel_expert_routing = ParallelExpertRouting, attention_mode = AttentionMode, wide_prefill = WidePrefill, prompt_tokens = tokens.Length,
             tokenizer_wall_ms = timer.Elapsed.TotalMilliseconds, context_window = ContextWindow,
             prefix_caching = PrefixCachingEnabled, draft_enabled = draft is not null,
             sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))) }));

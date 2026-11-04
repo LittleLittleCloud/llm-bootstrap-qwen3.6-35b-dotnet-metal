@@ -5,6 +5,7 @@ namespace Bootstrap.Engine;
 internal sealed class DeviceAttentionWorkspace(Metal gpu) : IDisposable
 {
     GpuBuffer? query, key, value, probability;
+    public GpuBuffer PackedQuery => query ?? throw new InvalidOperationException("Attention is not prepared");
     void Ensure(ref GpuBuffer? buffer, ulong bytes)
     {
         if (buffer is not null && buffer.Length >= bytes) return;
@@ -46,12 +47,12 @@ internal sealed class DeviceAttentionWorkspace(Metal gpu) : IDisposable
     // Group eight adjacent query heads around their shared KV head. Below 32
     // queries the measured causal device path is faster than the fused kernel.
     public const int OnlineGroupHeads = 8;
-    public void EncodeOnline(GpuBuffer q, GpuBuffer k, GpuBuffer v, GpuBuffer gate, GpuBuffer scores, GpuBuffer output, int rows, int position, bool halfKv = false)
+    public void EncodeOnline(GpuBuffer q, GpuBuffer k, GpuBuffer v, GpuBuffer gate, GpuBuffer scores, GpuBuffer output, int rows, int position, bool halfKv = false, bool preparedQuery = false)
     {
         if (rows < 32) { Encode(q, k, v, gate, scores, output, rows, position, halfKv, causal: true); return; }
         int length = position + rows, heads = OnlineGroupHeads;
         var p = new KernelArgs { M = (uint)rows, K = (uint)length, Position = (uint)position, A = (uint)heads };
-        gpu.Dispatch("attention_query_grouped_half", p, (uint)rows * 1024, 128, q, query!);
+        if (!preparedQuery) gpu.Dispatch("attention_query_grouped_half", p, (uint)rows * 1024, 128, q, query!);
         if (!halfKv)
         {
             var convert = new KernelArgs { N = (uint)length * 512 };

@@ -138,7 +138,7 @@ internal sealed partial class QwenEngine
     }
     // Reuse is explicit: the caller must have packed the same unchanged input
     // and shape, with no intervening projection using the shared scratch.
-    void BatchProject(string name, GpuBuffer input, GpuBuffer output, int count, bool reusePackedInput = false)
+    void BatchProject(string name, GpuBuffer input, GpuBuffer output, int count, bool reusePackedInput = false, GpuBuffer? packedInput = null)
     {
         var tensor = weights[name + ".weight"];
         var scales = tensor.Kind is 0 or 3 ? weights[name + ".weight_scale_inv"].Binding : (Binding)dummy;
@@ -155,9 +155,14 @@ internal sealed partial class QwenEngine
             if ((ulong)tensor.Shape[0] * (ulong)tensor.Shape[1] * 2 > b.PackedWeights.Length || (ulong)count * (ulong)tensor.Shape[1] * 2 > b.PackedInputs.Length)
                 throw new ArgumentException("Projection exceeds predecoded scratch workspace");
             var p = new KernelArgs { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind };
-            gpu.Dispatch("projection_unpack_half", p, p.N * p.K / 4, 128, tensor.Binding, scales, b.PackedWeights);
-            if (!reusePackedInput) gpu.Dispatch("projection_input_half", p, p.M * p.K / 4, 128, input, b.PackedInputs);
-            gpu.Dispatch2D("matrix_product_predecoded", p, ((p.N + 63) / 64) * 128, (p.M + 63) / 64, 128, b.PackedInputs, b.PackedWeights, output);
+            Binding packedWeight = b.PackedWeights;
+            bool resident = FuseDispatch(1, count) && residentProjections.TryGetValue(name, out var unused);
+            bool staged = FuseDispatch(2, count) && tensor.Kind == 3 && !resident;
+            if (resident) packedWeight = residentProjections[name];
+            else if (!staged) gpu.Dispatch("projection_unpack_half", p, p.N * p.K / 4, 128, tensor.Binding, scales, b.PackedWeights);
+            if (packedInput is null && !reusePackedInput) gpu.Dispatch("projection_input_half", p, p.M * p.K / 4, 128, input, b.PackedInputs);
+            if (staged) gpu.Dispatch2D("dense_affine_pipeline", p, ((p.N + 63) / 64) * 128, (p.M + 127) / 128, 128, packedInput ?? b.PackedInputs, tensor.Binding, scales, output);
+            else gpu.Dispatch2D("matrix_product_predecoded", p, ((p.N + 63) / 64) * 128, (p.M + 63) / 64, 128, packedInput ?? b.PackedInputs, packedWeight, output);
             return;
         }
         bool small = tensor.Shape[0] <= 32;
@@ -182,6 +187,7 @@ internal sealed partial class QwenEngine
             b.DeltaReferenceOutput ??= Buffer(b.Capacity * 4096);
         }
         if (!verify && (AttentionMode is "fp16-device" or "fp16-online")) { deviceAttention ??= new(gpu); deviceAttention.Prepare(count, position + count, HalfKv, AttentionMode == "fp16-online"); }
+        if (!verify) PrepareDispatchFusion(count);
         gpu.Begin();
         BatchEmbed(b.Tokens, b.Hidden, count);
         for (int layer = 0; layer < 40; layer++)
@@ -194,7 +200,8 @@ internal sealed partial class QwenEngine
                 string path = prefix + ".linear_attn";
                 BatchProject(path + ".in_proj_qkv", b.Norm, b.Qkv, count, reusePackedInput: packedNorm); BatchProject(path + ".in_proj_z", b.Norm, b.Z, count, reusePackedInput: true);
                 // qkv/z/a/b read the same unchanged Norm rows and K. No intervening pack.
-                BatchProject(path + ".in_proj_a", b.Norm, b.A, count, reusePackedInput: true); BatchProject(path + ".in_proj_b", b.Norm, b.B, count, reusePackedInput: true);
+                if (!verify && FuseDispatch(4, count)) BatchProjectMany([path + ".in_proj_a", path + ".in_proj_b"], [b.A, b.B], b.Norm, count, true);
+                else { BatchProject(path + ".in_proj_a", b.Norm, b.A, count, reusePackedInput: true); BatchProject(path + ".in_proj_b", b.Norm, b.B, count, reusePackedInput: true); }
                 bool fusedPreparation = optimizedDelta && DeltaPreparation == "fused";
                 if (fusedPreparation)
                     gpu.Dispatch("delta_prepare_fused", new() { M = (uint)count }, (uint)count * 16 * 128, 128, b.Qkv, weights[path + ".conv1d.weight"].Binding, convolution[layer], b.Conv, b.Q, b.K, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, b.DeltaGates!);
@@ -228,13 +235,19 @@ internal sealed partial class QwenEngine
             else
             {
                 string path = prefix + ".self_attn";
-                BatchProject(path + ".q_proj", b.Norm, b.Qkv, count, reusePackedInput: packedNorm); BatchProject(path + ".k_proj", b.Norm, b.K, count, reusePackedInput: true); BatchProject(path + ".v_proj", b.Norm, b.V, count, reusePackedInput: true);
-                gpu.Dispatch("batch_split_q", new() { M = (uint)count }, checked((uint)count * 4096), 128, b.Qkv, b.Q, b.Qgate);
-                Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
-                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f, Flags = KvFlags };
-                gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
+                if (!verify && FuseDispatch(4, count)) BatchProjectMany([path + ".q_proj", path + ".k_proj", path + ".v_proj"], [b.Qkv, b.K, b.V], b.Norm, count, packedNorm);
+                else { BatchProject(path + ".q_proj", b.Norm, b.Qkv, count, reusePackedInput: packedNorm); BatchProject(path + ".k_proj", b.Norm, b.K, count, reusePackedInput: true); BatchProject(path + ".v_proj", b.Norm, b.V, count, reusePackedInput: true); }
+                var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f, Flags = KvFlags, Epsilon = 1e-6f };
+                bool preparedAttention = !verify && FuseDispatch(16, count) && HalfKv && AttentionMode == "fp16-online" && count >= 32;
+                if (preparedAttention) gpu.Dispatch("attention_prepare_fused", p, (uint)count * 18 * 256, 256, b.Qkv, b.K, b.V,
+                    weights[path + ".q_norm.weight"].Binding, weights[path + ".k_norm.weight"].Binding, deviceAttention!.PackedQuery, b.Qgate, keyCache[layer], valueCache[layer]);
+                else {
+                    gpu.Dispatch("batch_split_q", new() { M = (uint)count }, checked((uint)count * 4096), 128, b.Qkv, b.Q, b.Qgate);
+                    Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
+                    gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
+                }
                 if (!verify && AttentionMode == "fp16-online")
-                    deviceAttention!.EncodeOnline(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position, HalfKv);
+                    deviceAttention!.EncodeOnline(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position, HalfKv, preparedAttention);
                 else if (!verify && AttentionMode == "fp16-device")
                     deviceAttention!.Encode(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position, HalfKv, CausalDeviceAttention);
                 else if (AttentionMode == "fused-fp16")
@@ -322,13 +335,15 @@ internal sealed partial class QwenEngine
             }
             // The routed expert path uses PackedExpertInputs, preserving the
             // Norm conversion made by the router projection in PackedInputs.
-            BatchProject(prefix + ".mlp.shared_expert.gate_proj", b.Norm, b.SharedGate, count, reusePackedInput: stagedExperts); BatchProject(prefix + ".mlp.shared_expert.up_proj", b.Norm, b.SharedUp, count, reusePackedInput: true);
-            // Compute the scalar gate while packed Norm is still live. The down
-            // projection below repacks SharedActivation into this same scratch.
+            bool fusedShared = !verify && FuseDispatch(8, count);
+            bool groupedShared = !verify && FuseDispatch(4, count);
+            // Scalar gate must consume the packed Norm before down repacks.
             bool earlyScalar = FastSmallProjections && PredecodedProjections && count > VerificationCapacity;
+            if (fusedShared || groupedShared) BatchProjectMany([prefix + ".mlp.shared_expert.gate_proj", prefix + ".mlp.shared_expert.up_proj"], [b.SharedGate, b.SharedUp], b.Norm, count, stagedExperts, fusedShared);
+            else { BatchProject(prefix + ".mlp.shared_expert.gate_proj", b.Norm, b.SharedGate, count, reusePackedInput: stagedExperts); BatchProject(prefix + ".mlp.shared_expert.up_proj", b.Norm, b.SharedUp, count, reusePackedInput: true); }
             if (earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, reusePackedInput: true);
-            gpu.Dispatch("silu_product", new() { N = checked((uint)count * 512) }, checked((uint)count * 512), 128, b.SharedGate, b.SharedUp, b.SharedActivation);
-            BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count);
+            if (!fusedShared) gpu.Dispatch("silu_product", new() { N = checked((uint)count * 512) }, checked((uint)count * 512), 128, b.SharedGate, b.SharedUp, b.SharedActivation);
+            BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count, packedInput: fusedShared ? sharedPackedActivation : null);
             if (!earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count);
             gpu.Dispatch("batch_mix", new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
             ActiveDraft?.Capture(layer, b.Hidden, count);
