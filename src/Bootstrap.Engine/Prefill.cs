@@ -2,6 +2,25 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    string projectionPreparation = "baseline";
+    public string ProjectionPreparation
+    {
+        get => projectionPreparation;
+        set {
+            if (value is not ("baseline" or "fused")) throw new ArgumentException("Invalid projection preparation");
+            if (projectionPreparation != value) { ClearPrefixCache(); projectionPreparation = value; }
+        }
+    }
+    bool PackNormalizedInput(int count) => ProjectionPreparation == "fused" && PredecodedProjections && TensorOpsPrecision == "fp16" && count > VerificationCapacity;
+    void NormalizePacked(GpuBuffer input, string name, GpuBuffer output, uint dimension, uint heads, bool offset = true, GpuBuffer? gate = null, GpuBuffer? residual = null)
+    {
+        var tensor = weights[name + ".weight"];
+        if (tensor.Dtype != "BF16") throw new InvalidDataException("Unsupported norm weight precision");
+        var b = batch!; b.PackedInputs ??= Buffer(b.Capacity * 8192 / 2);
+        if ((ulong)dimension * heads * 2 > b.PackedInputs.Length) throw new ArgumentException("Normalization exceeds packed scratch workspace");
+        uint threads = dimension == 128 ? 128u : 256u;
+        gpu.Dispatch("rmsnorm_pack", new() { N = dimension, M = heads, Epsilon = 1e-6f, Flags = (offset ? 1u : 0u) | (gate is not null ? 2u : 0u) | (residual is not null ? 4u : 0u) }, heads * threads, threads, input, tensor.Binding, output, gate ?? dummy, b.PackedInputs, residual ?? dummy);
+    }
     string densePrefill = "baseline";
     public string DensePrefill
     {
@@ -156,6 +175,7 @@ internal sealed partial class QwenEngine
         EnsureCacheCapacity(position + count);
         ActiveDraft?.EnsureFeatureCapacity(count);
         bool optimizedDelta = !verify && count > VerificationCapacity && DeltaMode != "baseline";
+        bool packedNorm = !verify && PackNormalizedInput(count);
         if (optimizedDelta) b.DeltaGates ??= Buffer(b.Capacity * 64);
         if (optimizedDelta && ValidateDelta) {
             b.DeltaReferenceState ??= Buffer(524288);
@@ -166,11 +186,13 @@ internal sealed partial class QwenEngine
         BatchEmbed(b.Tokens, b.Hidden, count);
         for (int layer = 0; layer < 40; layer++)
         {
-            string prefix = Prefix(layer); Normalize(b.Hidden, prefix + ".input_layernorm", b.Norm, Hidden, (uint)count);
+            string prefix = Prefix(layer);
+            if (packedNorm) NormalizePacked(b.Hidden, prefix + ".input_layernorm", b.Norm, Hidden, (uint)count);
+            else Normalize(b.Hidden, prefix + ".input_layernorm", b.Norm, Hidden, (uint)count);
             if ((layer + 1) % 4 != 0)
             {
                 string path = prefix + ".linear_attn";
-                BatchProject(path + ".in_proj_qkv", b.Norm, b.Qkv, count); BatchProject(path + ".in_proj_z", b.Norm, b.Z, count, reusePackedInput: true);
+                BatchProject(path + ".in_proj_qkv", b.Norm, b.Qkv, count, reusePackedInput: packedNorm); BatchProject(path + ".in_proj_z", b.Norm, b.Z, count, reusePackedInput: true);
                 // qkv/z/a/b read the same unchanged Norm rows and K. No intervening pack.
                 BatchProject(path + ".in_proj_a", b.Norm, b.A, count, reusePackedInput: true); BatchProject(path + ".in_proj_b", b.Norm, b.B, count, reusePackedInput: true);
                 bool fusedPreparation = optimizedDelta && DeltaPreparation == "fused";
@@ -199,13 +221,14 @@ internal sealed partial class QwenEngine
                     }
                 } else
                 gpu.Dispatch("batch_delta", new() { M = (uint)count, Flags = verify ? 1u : 0u }, 32 * 128 * 32, 128, b.Q, b.K, b.Conv, b.A, b.B, weights[path + ".A_log"].Binding, weights[path + ".dt_bias"].Binding, state[layer], b.Rotated, verify ? verification!.State[layer] : dummy);
-                Normalize(b.Rotated, path + ".norm", b.Rotated, 128, checked((uint)count * 32), false, b.Z);
-                BatchProject(path + ".out_proj", b.Rotated, b.Projection, count);
+                if (packedNorm) NormalizePacked(b.Rotated, path + ".norm", b.Rotated, 128, checked((uint)count * 32), false, b.Z);
+                else Normalize(b.Rotated, path + ".norm", b.Rotated, 128, checked((uint)count * 32), false, b.Z);
+                BatchProject(path + ".out_proj", b.Rotated, b.Projection, count, reusePackedInput: packedNorm);
             }
             else
             {
                 string path = prefix + ".self_attn";
-                BatchProject(path + ".q_proj", b.Norm, b.Qkv, count); BatchProject(path + ".k_proj", b.Norm, b.K, count, reusePackedInput: true); BatchProject(path + ".v_proj", b.Norm, b.V, count, reusePackedInput: true);
+                BatchProject(path + ".q_proj", b.Norm, b.Qkv, count, reusePackedInput: packedNorm); BatchProject(path + ".k_proj", b.Norm, b.K, count, reusePackedInput: true); BatchProject(path + ".v_proj", b.Norm, b.V, count, reusePackedInput: true);
                 gpu.Dispatch("batch_split_q", new() { M = (uint)count }, checked((uint)count * 4096), 128, b.Qkv, b.Q, b.Qgate);
                 Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
                 var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f, Flags = KvFlags };
@@ -238,9 +261,12 @@ internal sealed partial class QwenEngine
                 }
                 BatchProject(path + ".o_proj", b.Rotated, b.Projection, count);
             }
-            gpu.Dispatch("add", new() { N = checked((uint)count * Hidden) }, checked((uint)count * Hidden), 128, b.Hidden, b.Projection, b.Hidden);
-            Normalize(b.Hidden, prefix + ".post_attention_layernorm", b.Norm, Hidden, (uint)count);
-            BatchProject(prefix + ".mlp.gate", b.Norm, b.Router, count);
+            if (packedNorm) NormalizePacked(b.Hidden, prefix + ".post_attention_layernorm", b.Norm, Hidden, (uint)count, residual: b.Projection);
+            else {
+                gpu.Dispatch("add", new() { N = checked((uint)count * Hidden) }, checked((uint)count * Hidden), 128, b.Hidden, b.Projection, b.Hidden);
+                Normalize(b.Hidden, prefix + ".post_attention_layernorm", b.Norm, Hidden, (uint)count);
+            }
+            BatchProject(prefix + ".mlp.gate", b.Norm, b.Router, count, reusePackedInput: packedNorm);
             gpu.Dispatch("batch_router", new() { K = (uint)count }, (uint)count * 32, 128, b.Router, b.Ids, b.Rates);
             bool stagedExperts = count > VerificationCapacity && GatheredExperts && TensorOpsPrecision == "fp16" && ExpertKernel != "baseline";
             if (PackedExperts && count > VerificationCapacity && !(stagedExperts && ExpertKernel == "fused"))

@@ -199,6 +199,9 @@ With `--tuned-prefill`, KV storage is FP16 and the draft context FC now uses
 FP16 operands with FP32 accumulation/output. `--dense-prefill baseline` restores
 the earlier dense paths; `draft`, `small`, and `all` select the new paths for
 controlled comparisons. See [dense prefill implementation and checks](docs/DENSE_PREFILL.md).
+The tuned preset also fuses target RMSNorm, optional residual addition and FP16
+projection-input packing. Use `--projection-preparation baseline` for the original
+separate dispatches. See [projection preparation](docs/PROJECTION_PREPARATION.md).
 The draft uses projected features from eight target layers, noncausal sliding
 attention, grouped dynamic causal convolutions and the learned top-16 candidate
 selector. Each round proposes up to seven tokens after a verified anchor. The

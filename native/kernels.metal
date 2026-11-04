@@ -56,6 +56,17 @@ kernel void rmsnorm(device const float*x [[buffer(0)]],device const ushort*w [[b
     for(uint j=tid;j<p.n;j+=256){float v=x[group*p.n+j]*inv*(bf(w[j])+((p.flags&1)?1.0f:0.0f));if(p.flags&2)v*=silu(gate[group*p.n+j]);y[group*p.n+j]=v;}
 }
 kernel void add(device const float*x [[buffer(0)]],device const float*z [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=x[i]+z[i];}
+// Same reduction and expression order as rmsnorm; 128-wide rows omit only
+// the four all-zero SIMD groups. Optionally apply
+// the residual addition first, then emit the existing FP32 result and its FP16
+// projection operands together. Each row is owned by one threadgroup.
+kernel void rmsnorm_pack(device float*x [[buffer(0)]],device const ushort*w [[buffer(1)]],device float*y [[buffer(2)]],device const float*gate [[buffer(3)]],device half*packed [[buffer(4)]],device const float*residual [[buffer(5)]],constant P&p [[buffer(15)]],uint tid [[thread_index_in_threadgroup]],uint group [[threadgroup_position_in_grid]]) {
+    threadgroup float sums[8];threadgroup float inv;
+    float total=0;for(uint j=tid;j<p.n;j+=256){uint at=group*p.n+j;float v=x[at];if(p.flags&4){v+=residual[at];x[at]=v;}total+=v*v;}
+    total=simd_sum(total);if((tid&31)==0)sums[tid/32]=total;threadgroup_barrier(mem_flags::mem_threadgroup);
+    total=tid<(p.n==128?4u:8u)?sums[tid]:0;total=simd_sum(total);if(tid==0)inv=rsqrt(total/float(p.n)+p.eps);threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint j=tid;j<p.n;j+=256){uint at=group*p.n+j;float v=x[at]*inv*(bf(w[j])+((p.flags&1)?1.0f:0.0f));if(p.flags&2)v*=silu(gate[at]);y[at]=v;packed[at]=half(v);}
+}
 kernel void silu_product(device const float*x [[buffer(0)]],device const float*z [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {if(i<p.n)y[i]=silu(x[i])*z[i];}
 inline void route_simd(device const float*x,device int*ids,device float*prob,uint lane) {
     float values[8],chosen[8];
@@ -206,6 +217,14 @@ kernel void expert_matrix(device const float*x [[buffer(0)]],device const uchar*
 
 kernel void batch_mix(device const float*residual [[buffer(0)]],device const float*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*2048)return;uint token=i/2048,d=i%2048;float value=residual[i]+shared[i]*sigmoid(gate[token]);for(uint e=0;e<8;++e)value+=prob[token*8+e]*expert[inverse[token*8+e]*2048+d];y[i]=value;
+}
+// Four adjacent dimensions share routing metadata and the scalar shared gate.
+// Keep FP32 storage and the original left-to-right expert accumulation order.
+kernel void batch_mix_vec4(device const float4*residual [[buffer(0)]],device const float4*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float4*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float4*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i>=p.m*512)return;uint token=i/512,d=i%512;
+    float4 value=residual[i]+shared[i]*sigmoid(gate[token]);
+    for(uint e=0;e<8;++e)value+=prob[token*8+e]*expert[inverse[token*8+e]*512+d];
+    y[i]=value;
 }
 kernel void batch_conv(device const float*x [[buffer(0)]],device const ushort*w [[buffer(1)]],device float*state [[buffer(2)]],device float*y [[buffer(3)]],device float*tape [[buffer(4)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=8192)return;float s0=state[i],s1=state[8192+i],s2=state[16384+i],w0=bf(w[i*4]),w1=bf(w[i*4+1]),w2=bf(w[i*4+2]),w3=bf(w[i*4+3]);

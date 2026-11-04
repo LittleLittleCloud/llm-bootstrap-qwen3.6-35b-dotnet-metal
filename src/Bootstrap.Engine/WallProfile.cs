@@ -7,6 +7,30 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    public void CompareProjectionPreparation(string prompt, int runs)
+    {
+        if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
+        var tokens = Tokenizer.SimpleChat(prompt);
+        string original = ProjectionPreparation;
+        int? first = null;
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "projection_preparation_fixture", prompt_tokens = tokens.Length,
+            sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))),
+            context_window = ContextWindow, precision = TensorOpsPrecision, delta_mode = DeltaMode,
+            delta_preparation = DeltaPreparation, dense_prefill = DensePrefill, affine8 = Affine8 }));
+        try {
+            for (int run = 0; run <= runs; run++)
+                foreach (string mode in run % 2 == 0 ? new[] { "baseline", "fused" } : new[] { "fused", "baseline" }) {
+                    ProjectionPreparation = mode; ClearPrefixCache(); gpu.ResetWallTiming();
+                    var watch = Stopwatch.StartNew(); var result = Generate(tokens, 1, true); double wall = watch.Elapsed.TotalMilliseconds;
+                    if (first is not null && result.Tokens[0] != first) throw new Exception("Preparation first-token mismatch");
+                    first = result.Tokens[0];
+                    Console.WriteLine(JsonSerializer.Serialize(new { type = "projection_preparation_pair", run,
+                        mode = run == 0 ? "cold" : "warm_uncached", variant = mode, prompt_tokens = tokens.Length,
+                        wall_ms = wall, first_token = first, metal_buffer_bytes = AllocatedBytes, timing = gpu.ReadWallTiming() }));
+                }
+        } finally { ProjectionPreparation = original; ClearPrefixCache(); }
+    }
+
     public void CompareTensorOps(string prompt, int runs)
     {
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
@@ -66,7 +90,7 @@ internal sealed partial class QwenEngine
         if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
         var timer = Stopwatch.StartNew();
         var tokens = Tokenizer.SimpleChat(prompt);
-        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", packed_experts = PackedExperts, affine8 = Affine8, kv_cache_precision = KvCachePrecision, fp32_tensorops = Fp32TensorOps, projection_precision = TensorOpsPrecision, delta_mode = DeltaMode, delta_preparation = DeltaPreparation, dense_prefill = DensePrefill, expert_kernel = ExpertKernel, parallel_expert_routing = ParallelExpertRouting, attention_mode = AttentionMode, wide_prefill = WidePrefill, prompt_tokens = tokens.Length,
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "fixture", packed_experts = PackedExperts, affine8 = Affine8, kv_cache_precision = KvCachePrecision, fp32_tensorops = Fp32TensorOps, projection_precision = TensorOpsPrecision, delta_mode = DeltaMode, delta_preparation = DeltaPreparation, dense_prefill = DensePrefill, projection_preparation = ProjectionPreparation, expert_kernel = ExpertKernel, parallel_expert_routing = ParallelExpertRouting, attention_mode = AttentionMode, wide_prefill = WidePrefill, prompt_tokens = tokens.Length,
             tokenizer_wall_ms = timer.Elapsed.TotalMilliseconds, context_window = ContextWindow,
             prefix_caching = PrefixCachingEnabled, draft_enabled = draft is not null,
             sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))) }));
