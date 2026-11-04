@@ -29,7 +29,7 @@ struct Context {
     std::string error;
     bool profile=false;
     std::unordered_map<std::string,std::pair<double,uint64_t>> timings;
-    bool wall_enabled=false, attention_samples=false, all_samples=false;
+    bool wall_enabled=false, attention_samples=false, all_samples=false, profile_shapes=false;
     double wall[7]={}; // GPU seconds, encoding seconds, commit seconds, wait seconds, commands, dispatches, sample-resolution seconds
     double attention[6]={}; // QK/softmax/AV seconds, followed by their counts
     double begin_time=0;
@@ -50,6 +50,7 @@ void *boot_create(const char *source) { @autoreleasepool {
     Context *c=new Context(); c->device=MTLCreateSystemDefaultDevice();
     if(!c->device){delete c;return nullptr;}
     c->profile=getenv("BOOTSTRAP_PROFILE")!=nullptr;
+    c->profile_shapes=getenv("BOOTSTRAP_PROFILE_SHAPES")!=nullptr;
     c->queue=[c->device newCommandQueue]; NSError *error=nil;
     MTLCompileOptions *options=[MTLCompileOptions new]; options.mathMode=MTLMathModeSafe; options.languageVersion=MTLLanguageVersion4_0;
     c->library=[c->device newLibraryWithSource:[NSString stringWithUTF8String:source] options:options error:&error];
@@ -152,6 +153,14 @@ int boot_dispatch(void *handle,const char *name,void **buffers,const uint64_t *o
         pass.sampleBufferAttachments[0].startOfEncoderSampleIndex=at;
         pass.sampleBufferAttachments[0].endOfEncoderSampleIndex=at+1;
         c->encoder=[c->command computeCommandEncoderWithDescriptor:pass];c->sample_kinds.push_back(sample_kind);c->sample_names.emplace_back(name);
+        // Diagnostic attribution only: the same dense kernel serves target,
+        // shared-expert and draft projections. Preserve dispatch/pipeline/args.
+        // KernelArgs is sixteen 32-bit words; copy to avoid alignment assumptions.
+        if(c->profile_shapes && parameter_bytes==64){
+            uint32_t p[16];memcpy(p,parameters,sizeof(p));
+            c->sample_names.back()+="|N="+std::to_string(p[0])+",M="+std::to_string(p[1])+",K="+std::to_string(p[2])+
+                ",Kind="+std::to_string(p[3])+",Flags="+std::to_string(p[5])+",A="+std::to_string(p[6])+",B="+std::to_string(p[7])+",C="+std::to_string(p[12]);
+        }
     }
     if(!c->encoder)c->encoder=[c->command computeCommandEncoder];
     [c->encoder setComputePipelineState:pipeline];
