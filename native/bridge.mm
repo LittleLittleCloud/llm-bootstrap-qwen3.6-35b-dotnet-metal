@@ -10,6 +10,13 @@
 #include <chrono>
 #include <vector>
 #include <algorithm>
+#include <mach/mach_time.h>
+
+static double trace_now_ns() {
+    static const double scale=[] { mach_timebase_info_data_t t; mach_timebase_info(&t); return double(t.numer)/t.denom; }();
+    return double(mach_absolute_time())*scale;
+}
+struct TimelineEvent { std::string name, lane; double start, end; uint64_t command; };
 
 static double wall_now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -38,6 +45,8 @@ struct Context {
     std::vector<std::string> sample_names;
     std::unordered_map<std::string,std::pair<double,uint64_t>> kernel_wall;
     std::string kernel_json;
+    int timeline_run=-1; bool timeline=false; double timeline_start=0, timeline_begin=0;
+    std::vector<TimelineEvent> timeline_events;
 };
 struct Buffer {
     id<MTLBuffer> value;
@@ -77,11 +86,22 @@ int boot_wall_reset(void *handle,int sample_attention) { @autoreleasepool {
         }
         if(!c->samples){c->error="Timestamp counter set unavailable";return 0;}
     }
+    c->timeline_run++;
+    c->timeline=getenv("BOOTSTRAP_TIMELINE_FILE") && c->timeline_run>=4;
+    c->timeline_events.clear();c->timeline_start=trace_now_ns();
     c->wall_enabled=true;c->attention_samples=sample_attention!=0;c->all_samples=sample_attention==2;c->kernel_wall.clear();
     std::fill_n(c->wall,7,0.0);std::fill_n(c->attention,6,0.0);return 1;
 }}
 void boot_wall_read(void *handle,double *wall,double *attention) {
     Context *c=(Context*)handle;std::copy_n(c->wall,7,wall);std::copy_n(c->attention,6,attention);
+    if(c->timeline) { @autoreleasepool {
+        double end=trace_now_ns();NSMutableArray *events=[NSMutableArray new];
+        for(auto &e:c->timeline_events)[events addObject:@{@"name":@(e.name.c_str()),@"lane":@(e.lane.c_str()),@"start_ns":@(e.start),@"duration_ns":@(e.end-e.start),@"command":@(e.command)}];
+        auto record=@{@"run":@(c->timeline_run),@"sampled":@(c->all_samples),@"start_ns":@(c->timeline_start),@"end_ns":@(end),@"events":events};
+        auto data=[NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
+        FILE *f=fopen(getenv("BOOTSTRAP_TIMELINE_FILE"),"a");if(!f){perror("timeline output");abort();}
+        fwrite(data.bytes,1,data.length,f);fputc('\n',f);fclose(f);
+    }}
 }
 const char *boot_kernel_wall_json(void *handle) { @autoreleasepool {
     Context *c=(Context*)handle;NSMutableArray *rows=[NSMutableArray array];
@@ -119,6 +139,7 @@ int boot_begin(void *handle) { @autoreleasepool {
     Context *c=(Context*)handle;
     if(c->command){c->error="An unfinished command is active";return 0;}
     if(c->wall_enabled)c->begin_time=wall_now();
+    if(c->timeline)c->timeline_begin=trace_now_ns();
     c->sample_kinds.clear();c->sample_names.clear();c->command=[c->queue commandBuffer];return c->command!=nil;
 }}
 int boot_clear(void *handle,void *buffer) { @autoreleasepool {
@@ -128,7 +149,7 @@ int boot_clear(void *handle,void *buffer) { @autoreleasepool {
     Buffer *b=(Buffer*)buffer;[blit fillBuffer:b->value range:NSMakeRange(0,b->value.length) value:0];[blit endEncoding];return 1;
 }}
 int boot_dispatch(void *handle,const char *name,void **buffers,const uint64_t *offsets,int count,const void *parameters,int parameter_bytes,uint32_t x,uint32_t y,uint32_t z,uint32_t tx,uint32_t ty,uint32_t tz,void *indirect,uint64_t indirect_offset) { @autoreleasepool {
-    Context *c=(Context*)handle; id<MTLComputePipelineState> pipeline;
+    Context *c=(Context*)handle; double trace_start=c->timeline?trace_now_ns():0; id<MTLComputePipelineState> pipeline;
     auto found=c->pipelines.find(name);
     if(found==c->pipelines.end()){
         id<MTLFunction> function=[c->library newFunctionWithName:[NSString stringWithUTF8String:name]];
@@ -171,6 +192,7 @@ int boot_dispatch(void *handle,const char *name,void **buffers,const uint64_t *o
         if(indirect_offset%4 || indirect_offset>args->value.length || args->value.length-indirect_offset<12){c->error="Invalid indirect dispatch arguments";return 0;}
         [c->encoder dispatchThreadgroupsWithIndirectBuffer:args->value indirectBufferOffset:indirect_offset threadsPerThreadgroup:MTLSizeMake(tx,ty,tz)];
     }else [c->encoder dispatchThreads:MTLSizeMake(x,y,z) threadsPerThreadgroup:MTLSizeMake(tx,ty,tz)];
+    if(c->timeline)c->timeline_events.push_back({name,"CPU dispatch",trace_start,trace_now_ns(),uint64_t(c->wall[4])});
     if(c->wall_enabled)c->wall[5]++;
     if(c->all_samples || sample_kind>=0){[c->encoder endEncoding];c->encoder=nil;}
     // Opt-in diagnostic mode serializes submissions and is never used for formal timing.
@@ -188,10 +210,19 @@ int boot_end(void *handle) { @autoreleasepool {
     MTLTimestamp cpu0=0,gpu0=0,cpu1=0,gpu1=0;
     if(!c->sample_kinds.empty())[c->device sampleTimestamps:&cpu0 gpuTimestamp:&gpu0];
     double before=c->wall_enabled?wall_now():0;
+    double trace_commit=c->timeline?trace_now_ns():0;
     [c->command commit];
     double committed=c->wall_enabled?wall_now():0;
+    double trace_wait=c->timeline?trace_now_ns():0;
     [c->command waitUntilCompleted];
     double completed=c->wall_enabled?wall_now():0;
+    if(c->timeline){
+        auto id=uint64_t(c->wall[4]);
+        c->timeline_events.push_back({"encode","CPU encode",c->timeline_begin,trace_commit,id});
+        c->timeline_events.push_back({"commit","CPU commit",trace_commit,trace_wait,id});
+        c->timeline_events.push_back({"waitUntilCompleted","CPU wait",trace_wait,trace_now_ns(),id});
+        c->timeline_events.push_back({"command","GPU command",c->command.GPUStartTime*1e9,c->command.GPUEndTime*1e9,id});
+    }
     if(c->wall_enabled){
         c->wall[0]+=c->command.GPUEndTime-c->command.GPUStartTime;
         c->wall[1]+=before-c->begin_time;c->wall[2]+=committed-before;c->wall[3]+=completed-committed;c->wall[4]++;
@@ -219,6 +250,10 @@ int boot_end(void *handle) { @autoreleasepool {
                 uint64_t start=values[i*2].timestamp,end=values[i*2+1].timestamp;
                 if(start==MTLCounterErrorValue || end==MTLCounterErrorValue || end<start){c->error="Invalid GPU timestamp sample";ok=false;break;}
                 intervals.emplace_back(start,end);
+                if(c->timeline){
+                    double a=double(cpu0)+double(start-gpu0)*seconds_per_tick*1e9;
+                    c->timeline_events.push_back({c->sample_names[i],"GPU kernel",a,a+double(end-start)*seconds_per_tick*1e9,uint64_t(c->wall[4]-1)});
+                }
                 double seconds=(end-start)*seconds_per_tick;sampled_seconds+=seconds;
                 int kind=c->sample_kinds[i];if(kind>=0){c->attention[kind]+=seconds;c->attention[3+kind]++;}
                 auto &kernel=c->kernel_wall[c->sample_names[i]];kernel.first+=seconds;kernel.second++;

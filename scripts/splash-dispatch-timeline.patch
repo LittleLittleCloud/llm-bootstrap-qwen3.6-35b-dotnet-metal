@@ -1,0 +1,273 @@
+diff --git a/dev/benchmarks/decode_profile.mm b/dev/benchmarks/decode_profile.mm
+index 060cb2ea..ce9bf68d 100644
+--- a/dev/benchmarks/decode_profile.mm
++++ b/dev/benchmarks/decode_profile.mm
+@@ -38,10 +38,14 @@
+ #include <array>
+ #include <charconv>
+ #include <chrono>
++#include <mach/mach_time.h>
++static double timelineNowNs() { static const double scale=[] { mach_timebase_info_data_t t; mach_timebase_info(&t); return double(t.numer)/t.denom; }(); return double(mach_absolute_time())*scale; }
+ #include <cstdint>
+ #include <cstdio>
+ #include <filesystem>
+ #include <iostream>
++#include <fstream>
++#include <cstdlib>
+ #include <map>
+ #include <span>
+ #include <string>
+@@ -226,8 +230,10 @@ void profileImages(metal::MetalBackend &backend,
+   uint64_t pageTableRevision = 1;
+ };
+ 
++std::vector<uint32_t> observedPrefillTokens;
+ void prefill(model::Runtime &executor, Lane &lane,
+              std::span<const uint32_t> prompt) {
++  observedPrefillTokens.clear();
+   EngineRequest request;
+   request.id = lane.id;
+   request.prompt.assign(prompt.begin(), prompt.end());
+@@ -250,6 +256,8 @@ void prefill(model::Runtime &executor, Lane &lane,
+       throw std::runtime_error("prefill consumed the wrong row count");
+     if (!results[0].failure.empty())
+       throw std::runtime_error(results[0].failure);
++    if(results[0].firstToken)observedPrefillTokens.push_back(*results[0].firstToken);
++    observedPrefillTokens.insert(observedPrefillTokens.end(),results[0].outputTokens.begin(),results[0].outputTokens.end());
+     offset += count;
+   }
+   lane.position = prompt.size();
+@@ -314,12 +322,14 @@ int main(int argc, char **argv) {
+       // Streamed routed experts and PLE table (tools/LoadOptions.hpp).
+       model::ModelLoadOptions loadOptions;
+       bool textOptions = false;
+-      std::string dispatchList;
++      std::string dispatchList, tokensFile, traceFile;
+       for (int index = 3; index < argc; index += 2) {
+         const std::string_view option(argv[index]);
+         if (index + 1 >= argc)
+           throw std::invalid_argument(std::string(option) + " requires a value");
+-        if (option == "--prompt-tokens") {
++        if (option == "--tokens-file") { tokensFile=argv[index+1];
++        } else if(option == "--trace-out") { traceFile=argv[index+1];
++        } else if (option == "--prompt-tokens") {
+           promptTokens = parseCount(argv[index + 1], "--prompt-tokens");
+           textOptions = true;
+         } else if (option == "--cycles")
+@@ -349,6 +359,13 @@ int main(int argc, char **argv) {
+       if (!grids.empty() && textOptions)
+         throw std::invalid_argument("--images takes no other option than --cycles");
+ 
++      std::vector<uint32_t> suppliedTokens;
++      if(!tokensFile.empty()) {
++        std::ifstream input(tokensFile); uint32_t token;
++        while(input >> token) suppliedTokens.push_back(token);
++        if(suppliedTokens.empty() || !input.eof()) throw std::runtime_error("invalid token file");
++        promptTokens=static_cast<uint32_t>(suppliedTokens.size());
++      }
+       metal::MetalBackend backend(argv[1]);
+       const std::filesystem::path root(argv[2]);
+       if (!grids.empty()) {
+@@ -373,7 +390,7 @@ int main(int argc, char **argv) {
+       const kv::Layout kvLayout = model.targetKvLayout(format);
+       const uint32_t extentPages = kvLayout.maximumExtentPages();
+       const uint32_t pageCount =
+-          (pagesPerLane * 4 + extentPages - 1) / extentPages * extentPages;
++          (pagesPerLane * (tokensFile.empty() ? 4 : 1) + extentPages - 1) / extentPages * extentPages;
+       MemoryGovernor governor(
+           backend, backend.capabilities().recommendedMaxWorkingSetBytes, 1, 1,
+           queryHostMemory, 0);
+@@ -398,8 +415,29 @@ MemoryGovernor governor(
+         lanes[index] = {index + 1, index, 0,
+                         pageRange(index * pagesPerLane, pagesPerLane)};
+       }
+-      const std::vector<uint32_t> prompt = chatPrompt(promptTokens);
++      const std::vector<uint32_t> prompt = suppliedTokens.empty() ? chatPrompt(promptTokens) : suppliedTokens;
+ 
++      if(!tokensFile.empty()) {
++        std::vector<uint32_t> expected;
++        for(int run=0;run<6;++run) {
++          if(run>=4 && !traceFile.empty()) setenv("SPLASH_TIMELINE_FILE",(traceFile+(run==4?".cpu.jsonl":".gpu.jsonl")).c_str(),1);
++          if(run==5 && !traceFile.empty()) setenv("SPLASH_COUNTER_TRACE_FILE",traceFile.c_str(),1);
++          auto captureBefore=executor.telemetry().draftContextRowsActive;
++          double gpuBefore=executor.telemetry().totalPrefillGpuSeconds;
++          double timelineStart=timelineNowNs();
++          auto started=std::chrono::steady_clock::now();
++          prefill(executor,lanes[0],prompt);
++          double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
++          double gpu=executor.telemetry().totalPrefillGpuSeconds-gpuBefore;
++          std::printf("{\"type\":\"prefill\",\"run\":%d,\"tokens\":%u,\"wall_ms\":%.6f,\"gpu_ms\":%.6f,\"tok_s\":%.6f,\"sampled\":%s}\n",run,promptTokens,wall*1e3,gpu*1e3,promptTokens/wall,run==5?"true":"false");
++          if(run==0)expected=observedPrefillTokens;
++          if(observedPrefillTokens.empty() || observedPrefillTokens!=expected)throw std::runtime_error("prefill token changed across repeats/trace");
++          std::printf("{\"type\":\"check\",\"first_token\":%u,\"draft_context_rows\":%llu,\"repeat_equal\":true}\n",observedPrefillTokens[0],static_cast<unsigned long long>(executor.telemetry().draftContextRowsActive-captureBefore));
++          std::printf("{\"type\":\"timeline_range\",\"run\":%d,\"start_ns\":%.0f,\"end_ns\":%.0f}\n",run,timelineStart,timelineStart+wall*1e9);
++          std::fflush(stdout); unsetenv("SPLASH_COUNTER_TRACE_FILE"); unsetenv("SPLASH_TIMELINE_FILE"); executor.end(lanes[0].id);
++        }
++        return 0;
++      }
+       // Warm prefill and B1 decode with real work before measuring.
+       prefill(executor, lanes[0], prompt);
+       static_cast<void>(decodeCycle(backend, executor, std::span<Lane>(&lanes[0], 1)));
+diff --git a/runtime/metal/MetalBackend.mm b/runtime/metal/MetalBackend.mm
+index 9d5ad0f6..dd936cac 100644
+--- a/runtime/metal/MetalBackend.mm
++++ b/runtime/metal/MetalBackend.mm
+@@ -35,10 +35,100 @@
+ 
+ #include <pthread.h>
+ #include <unistd.h>
++#include <mach/mach_time.h>
+ 
+ namespace splash::metal {
+ namespace {
+ 
++// Host-only timeline mode preserves normal encoder and command boundaries.
++static double timelineNowNs() {
++    static const double scale=[] { mach_timebase_info_data_t t; mach_timebase_info(&t); return double(t.numer)/t.denom; }();
++    return double(mach_absolute_time())*scale;
++}
++struct DispatchTimeline {
++    struct Event { std::string name; double start,end; };
++    NSString *path; uint64_t sequence; double start=timelineNowNs(),commitStart=0;
++    std::atomic<double> commitEnd{0};
++    std::vector<Event> dispatches;
++    std::vector<id<MTLCommandBuffer>> commands;
++    DispatchTimeline(uint64_t seq):sequence(seq) { path=@(getenv("SPLASH_TIMELINE_FILE")); }
++    void finish() { @autoreleasepool {
++        double end=timelineNowNs();NSMutableArray *events=[NSMutableArray new];
++        for(auto &e:dispatches)[events addObject:@{@"name":@(e.name.c_str()),@"lane":@"CPU dispatch",@"start_ns":@(e.start),@"duration_ns":@(e.end-e.start),@"command":@(sequence)}];
++        [events addObject:@{@"name":@"encode",@"lane":@"CPU encode",@"start_ns":@(start),@"duration_ns":@(commitStart-start),@"command":@(sequence)}];
++        double committed=commitEnd.load();
++        if(committed>commitStart)[events addObject:@{@"name":@"commitSubmission",@"lane":@"CPU commit",@"start_ns":@(commitStart),@"duration_ns":@(committed-commitStart),@"command":@(sequence)}];
++        for(auto c:commands)[events addObject:@{@"name":@"command",@"lane":@"GPU command",@"start_ns":@(c.GPUStartTime*1e9),@"duration_ns":@((c.GPUEndTime-c.GPUStartTime)*1e9),@"command":@(sequence)}];
++        auto record=@{@"sequence":@(sequence),@"start_ns":@(start),@"end_ns":@(end),@"events":events};
++        auto data=[NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
++        static std::mutex mutex;std::lock_guard lock(mutex);
++        FILE *f=fopen(path.fileSystemRepresentation,"a");if(!f){perror("timeline output");abort();}
++        fwrite(data.bytes,1,data.length,f);fputc('\n',f);fclose(f);
++    }}
++};
++
++// Local diagnostic only: keep command boundaries and capture encoder intervals.
++struct CounterTrace {
++    id<MTLDevice> device;
++    NSMutableArray<id<MTLCounterSampleBuffer>> *samples;
++    NSMutableArray<NSString*> *names;
++    NSString *path;
++    MTLTimestamp cpu0=0,gpu0=0;
++    std::vector<id<MTLCommandBuffer>> commands;
++    uint64_t sequence;
++    CounterTrace(id<MTLDevice> d, size_t count, uint64_t seq):device(d),sequence(seq) {
++        path=[NSString stringWithUTF8String:getenv("SPLASH_COUNTER_TRACE_FILE")];
++        if(![d supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
++            throw MetalBackendError("Stage counter sampling unavailable");
++        samples=[NSMutableArray new];names=[NSMutableArray new];
++        id<MTLCounterSet> ts=nil;
++        for(id<MTLCounterSet> set in d.counterSets)if([set.name isEqualToString:MTLCommonCounterSetTimestamp])ts=set;
++        if(!ts)throw MetalBackendError("Timestamp counter set unavailable");
++        for(size_t offset=0;offset<count*2;offset+=4096) {
++            MTLCounterSampleBufferDescriptor *desc=[MTLCounterSampleBufferDescriptor new];
++            desc.counterSet=ts;desc.storageMode=MTLStorageModeShared;desc.sampleCount=4096;
++            NSError *error=nil;auto b=[d newCounterSampleBufferWithDescriptor:desc error:&error];
++            if(!b)throw MetalBackendError("Cannot allocate timestamp buffer");
++            [samples addObject:b];
++        }
++        [d sampleTimestamps:&cpu0 gpuTimestamp:&gpu0];
++    }
++    id<MTLComputeCommandEncoder> encoder(id<MTLCommandBuffer> command,std::string_view name,size_t index) {
++        [names addObject:[[NSString alloc] initWithBytes:name.data() length:name.size() encoding:NSUTF8StringEncoding]];
++        MTLComputePassDescriptor *pass=[MTLComputePassDescriptor computePassDescriptor];
++        pass.sampleBufferAttachments[0].sampleBuffer=samples[index*2/4096];
++        pass.sampleBufferAttachments[0].startOfEncoderSampleIndex=index*2%4096;
++        pass.sampleBufferAttachments[0].endOfEncoderSampleIndex=index*2%4096+1;
++        return [command computeCommandEncoderWithDescriptor:pass];
++    }
++    void finish() {
++        @autoreleasepool {
++            MTLTimestamp cpu1=0,gpu1=0;[device sampleTimestamps:&cpu1 gpuTimestamp:&gpu1];
++            if(cpu1<=cpu0 || gpu1<=gpu0){fprintf(stderr,"TRACE_ERROR invalid calibration\n");abort();}
++            double nsPerTick=double(cpu1-cpu0)/double(gpu1-gpu0);
++            NSMutableData *data=[NSMutableData new];
++            for(size_t first=0;first<names.count*2;first+=4096) {
++                auto part=[samples[first/4096] resolveCounterRange:NSMakeRange(0,std::min<size_t>(4096,names.count*2-first))];
++                if(part)[data appendData:part];
++            }
++            if(data.length!=names.count*2*sizeof(MTLCounterResultTimestamp)){fprintf(stderr,"TRACE_ERROR invalid resolution\n");abort();}
++            const auto *v=(const MTLCounterResultTimestamp*)data.bytes;
++            NSMutableArray *events=[NSMutableArray new];
++            for(size_t i=0;i<names.count;++i) {
++                uint64_t a=v[2*i].timestamp,b=v[2*i+1].timestamp;
++                if(a==MTLCounterErrorValue || b==MTLCounterErrorValue || b<a || a<gpu0 || b>gpu1){fprintf(stderr,"TRACE_ERROR invalid interval\n");abort();}
++                [events addObject:@{@"kernel":names[i],@"start_ns":@(double(cpu0)+double(a-gpu0)*nsPerTick),@"duration_ns":@(double(b-a)*nsPerTick)}];
++            }
++            double gpuMs=0;for(auto command:commands)gpuMs+=(command.GPUEndTime-command.GPUStartTime)*1000;
++            auto record=@{@"sequence":@(sequence),@"gpu_ms":@(gpuMs),@"command_buffers":@(commands.size()),@"events":events};
++            auto json=[NSJSONSerialization dataWithJSONObject:record options:0 error:nil];
++            static std::mutex mutex;std::lock_guard lock(mutex);
++            FILE *f=fopen(path.fileSystemRepresentation,"a");if(!f){fprintf(stderr,"TRACE_ERROR cannot write\n");abort();}
++            fwrite(json.bytes,1,json.length,f);fputc('\n',f);fclose(f);
++        }
++    }
++};
++
+ // The accelerator entry that backs a Metal device publishes gpu-core-count.
+ // The device's registry ID names that entry or a child of it; the first
+ // IOAccelerator service is the fallback, since Apple silicon Macs have one
+@@ -1319,6 +1409,10 @@ CommandTicket commit(std::span<const PreparedDispatch> dispatches,
+ 
+         auto failEncoding = [](std::string message) { throw MetalBackendError(std::move(message)); };
+ 
++        std::shared_ptr<DispatchTimeline> timeline;
++        if(getenv("SPLASH_TIMELINE_FILE"))timeline=std::make_shared<DispatchTimeline>(ticketState->sequence);
++        std::shared_ptr<CounterTrace> trace;
++        if(getenv("SPLASH_COUNTER_TRACE_FILE"))trace=std::make_shared<CounterTrace>(device,dispatches.size(),ticketState->sequence);
+         auto wallStart = AwakeClock::now();
+         // The buffers before the last commit as their encoding ends, so the
+         // GPU starts the command's work while the rest is still encoded.
+@@ -1389,10 +1483,12 @@ CommandTicket commit(std::span<const PreparedDispatch> dispatches,
+                 NSUInteger offsets[kBufferArgumentEntries];
+                 for (size_t index = 0; index < dispatches.size(); ++index) {
+                     encodeSteps(index);
++                    double dispatchStart=timeline?timelineNowNs():0;
+                     const PreparedDispatch &item = dispatches[index];
+                     const ComputeDispatch &dispatch = *item.source;
++                    if(trace && encoder){[encoder endEncoding];encoder=nil;}
+                     if (!encoder) {
+-                        encoder = [command computeCommandEncoder];
++                        encoder = trace ? trace->encoder(command,dispatch.pipelineName,index) : [command computeCommandEncoder];
+                         if (!encoder) {
+                             failEncoding("unable to create Metal compute encoder");
+                         }
+@@ -1431,10 +1527,13 @@ CommandTicket commit(std::span<const PreparedDispatch> dispatches,
+                         [encoder dispatchThreadgroups:item.groups
+                                  threadsPerThreadgroup:item.threads];
+                     }
++                    if(timeline)timeline->dispatches.push_back({std::string(dispatch.pipelineName),dispatchStart,timelineNowNs()});
+                 }
+                 encodeSteps(dispatches.size());
+                 if (encoder) [encoder endEncoding];
+                 ticketState->leadingCommands = leading;
++                if(trace){trace->commands=leading;trace->commands.push_back(command);}
++                if(timeline){timeline->commands=leading;timeline->commands.push_back(command);}
+ 
+                 // Driver callbacks only complete the ticket. Device-wide memory
+                 // telemetry is sampled on the host when consuming the result. The
+@@ -1442,14 +1541,18 @@ CommandTicket commit(std::span<const PreparedDispatch> dispatches,
+                 // up on the command, it keeps the retained allocations until the
+                 // GPU ends.
+                 [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
++                    if(trace)trace->finish();
++                    if(timeline)timeline->finish();
+                     ticketState->finishCommand(completed);
+                 }];
++                if(timeline)timeline->commitStart=timelineNowNs();
+                 asyncState->commitSubmission(ticketState->sequence, command,
+                     [weakTicket = std::weak_ptr(ticketState)](
+                         id<MTLCommandBuffer> completed) {
+                         if (auto ticket = weakTicket.lock())
+                             ticket->finishCommand(completed);
+                     });
++                if(timeline)timeline->commitEnd.store(timelineNowNs());
+             } catch (...) {
+                 std::string reason = "Metal command encoding failed";
+                 try {

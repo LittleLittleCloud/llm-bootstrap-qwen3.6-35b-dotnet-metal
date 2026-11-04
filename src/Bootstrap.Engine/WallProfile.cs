@@ -114,9 +114,11 @@ internal sealed partial class QwenEngine
             sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))) }));
         using var process = Process.GetCurrentProcess();
         int? expected = null;
-        for (int run = 0; run < runs + 2; run++)
+        bool timeline = Environment.GetEnvironmentVariable("BOOTSTRAP_TIMELINE_FILE") is not null;
+        if (timeline && runs != 3) throw new ArgumentException("Timeline capture requires --runs 3");
+        for (int run = 0; run < runs + (timeline ? 3 : 2); run++)
         {
-            bool samples = run == runs + 1;
+            bool samples = run == runs + (timeline ? 2 : 1);
             ClearPrefixCache();
             gpu.ResetWallTiming(samples, samples && allKernels);
             var started = DateTimeOffset.UtcNow;
@@ -129,7 +131,7 @@ internal sealed partial class QwenEngine
             if (expected is not null && first != expected) throw new Exception("Profiling changed first-token output");
             expected = first;
             Console.WriteLine(JsonSerializer.Serialize(new { type = "prefill", run, started_utc = started, completed_utc = DateTimeOffset.UtcNow,
-                mode = samples ? (allKernels ? "all_kernel_encoder_counters" : "attention_encoder_counters") : run == 0 ? "cold_first_run" : "warm_uncached",
+                mode = samples ? (allKernels ? "all_kernel_encoder_counters" : "attention_encoder_counters") : timeline && run == 4 ? "cpu_dispatch_trace" : run == 0 ? "cold_first_run" : "warm_uncached",
                 wall_ms = wall, process_cpu_ms = cpuMs, prompt_tokens = tokens.Length,
                 tokens_per_second = tokens.Length / (wall / 1000), first_token = first,
                 metal_buffer_bytes = AllocatedBytes, timing = gpu.ReadWallTiming() }));

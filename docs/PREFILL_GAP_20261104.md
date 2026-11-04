@@ -117,3 +117,87 @@ python3 scripts/summarize-current-gap.py artifacts/current-gap
 ```
 
 Use the exact prior fixture/model/metallib locations recorded by the primary driver's arguments. Output directories must be new so observations cannot be silently overwritten.
+
+## Follow-up: dispatch and 10K prefill timelines
+
+Fresh serial captures use the same 10,520 input IDs and model configurations as above. Each process performs one cold request, three warm uncached requests without timeline collection, one CPU-only timeline request, then one CPU + GPU-counter request. Loading and tokenization are excluded; reset, prefill and first-token selection are included. These are direct-runtime diagnostics, not endpoint TTFT measurements.
+
+| Configuration | Warm median, ms | Tokens/s | Compute dispatches | Command buffers | CPU encode, ms | CPU dispatch calls, ms |
+|---|---:|---:|---:|---:|---:|---:|
+| Ours FP16 KV | 3807.254 | 2763.1 | 7218 | 8 | 4.537 | 1.878 |
+| Splash INT8 KV | 3438.091 | 3059.8 | 3543 | 6 | 0.983 | 0.874 |
+| Splash BF16 KV | 3569.519 | 2947.2 | 3543 | 6 | 0.993 | 0.878 |
+
+The CPU columns come from the CPU-only trace, not the warm median. Dispatch call time covers the native dispatch wrapper's pipeline/buffer binding and encoding; CPU encode covers the enclosing command construction and includes those calls. They are nested, not additive. Ours' reset-only blit command is included in the eight command buffers but has zero compute dispatches. Splash's CPU span starts at its backend submission encoding; runtime command-graph preparation before that point is outside this span. For ours, native encoding time also includes managed work between `Begin` and `End`. These are observed submission spans, not matched-language microbenchmarks.
+
+Ours has 2.04 times the dispatch count, but the additional CPU encoding is only about 3.55 ms. In the CPU-only captures, GPU command execution covers 3785.536 / 3431.146 / 3553.518 ms of 3810.561 / 3439.908 / 3562.351 ms request wall time. CPU API dispatch overhead does not explain the roughly 369 ms warm latency difference against Splash INT8. Dispatch count can still matter through GPU-side launch/scheduling, fusion, intermediate traffic and repeated work; these measurements do not isolate those effects.
+
+### A small tail that the previous aggregate profile concealed
+
+Shape-labelled GPU traces show ours executes chunks `2048 × 5, 272, 8`, whereas Splash's prefill budget produces `2048 × 5, 280`. `PrefixBoundaries` retains the last message end at token 10512, in addition to the full prompt end at 10520. `Generate` honors that checkpoint before the final eight chat-header tokens. This splits the last 280-token block and selects the tiny-row kernel path for the final eight rows.
+
+| Ours command, CPU-only trace | Rows | Dispatches | GPU time, ms |
+|---|---:|---:|---:|
+| Reset / clear | — | 0 | 1.564 |
+| Prefill 1 | 2048 | 1014 | 641.840 |
+| Prefill 2 | 2048 | 1017 | 672.706 |
+| Prefill 3 | 2048 | 1014 | 704.747 |
+| Prefill 4 | 2048 | 1017 | 735.321 |
+| Prefill 5 | 2048 | 1014 | 765.613 |
+| Prefill 6 | 272 | 1017 | 204.495 |
+| Prefill 7 | 8 | 1125 | 59.250 |
+
+The tail is a concrete follow-up experiment: measure a policy that avoids splitting a tiny final suffix at a prefix checkpoint, or retains the checkpoint using an implementation that does not run a separate full-network tiny block. Prefix reuse and draft-context restoration semantics must be checked. The 59.25 ms is an observed command cost, not a promised saving: merged rows still require computation, and changing checkpoint policy changes reusable prefixes. No checkpoint or kernel optimization was applied in this profiling task.
+
+### Sampling overhead and timeline interpretation
+
+| Configuration | CPU-only trace, ms | Difference vs warm median | GPU-counter trace, ms | Difference vs warm median |
+|---|---:|---:|---:|---:|
+| Ours | 3810.561 | +0.087% | 4029.623 | +5.841% |
+| Splash INT8 | 3439.908 | +0.053% | 3461.232 | +0.673% |
+| Splash BF16 | 3562.351 | −0.201% | 3581.779 | +0.343% |
+
+These are single diagnostic repeats relative to three warm repeats; signed differences include timing drift, not just instrumentation cost. CPU-only mode retains ordinary compute encoders and command boundaries. GPU sampling uses one encoder per dispatch inside the original command buffers. Ours' eight-row final command grows from 59.250 to 214.054 ms: this accounts for 81.3% of the observed increase in total command GPU duration. The sampled tail's gaps must not be interpreted as normal production idle time.
+
+Host events use `mach_absolute_time` converted through the Mach timebase. GPU command bounds use Metal's CPU-clock timestamps; GPU encoder counters are calibrated using `sampleTimestamps`. All sampled intervals were checked against their corresponding GPU command bounds, allowing 100 µs calibration tolerance. Encoder intervals can overlap; their sum is not wall time or exclusively occupied GPU time. Every independently captured process starts at zero in the charts. CPU burst-start ticks in the overview mark positions; their widths do not represent CPU durations, which are mostly subpixel at this scale.
+
+Ours serializes trace JSON after the timed request. Splash's diagnostic completion callback resolves/writes its per-command trace before completion is consumed; that cost remains in its diagnostic wall measurement and is reflected in the overhead table. Normal medians have neither trace collection nor trace output.
+
+All 18 requests returned first token 22; CPU and GPU capture dispatch counts match exactly for each configuration. The Release build passed with zero warnings/errors, and production `kernels.metal` is byte-identical to the earlier baseline. This is a first-token repeat check, not a full generation-quality evaluation. No thermal warning was sampled. Whole-process ours showed 702.625 MiB of new system swap-outs during loading/cold/early warm activity; the 3-second samples bracketing its first warm request include 346 MiB, so that request is not a clean memory-pressure control. Later sampled warm/trace windows show no further increments; the two later warm measurements are 3806.052 and 3807.254 ms. Both Splash processes showed zero new swap-outs. These machine-wide samples are not precise per-request attribution.
+
+### Artifacts and reproduction
+
+All local outputs are in `artifacts/dispatch-timeline/` (ignored generated evidence):
+
+- `prefill-10k-overview.png` / `.svg`: normal-boundary CPU/GPU command timeline.
+- `dispatch-and-kernels-zoom.png` / `.svg`: CPU dispatch encoding and the first 45 ms of sampled kernels, with separate clocks/captures explicitly labelled.
+- `prefill-10k-kernels.png` / `.svg`: full sampled kernel timeline.
+- `{ours-fp16,splash-int8,splash-bf16}-{cpu,sampled}.trace.json`: six Chrome trace-event files, importable into Perfetto or a compatible viewer for individual dispatch inspection.
+- `commands.csv`, `summary.json`, per-case stdout/stderr/memory/raw JSONL, binary/source identities, source patches and `evidence-manifest.json`.
+
+The source patch `scripts/splash-dispatch-timeline.patch` applies to Splash `1482f6bbc2abf12375332725302019594150b6cb`; it includes the earlier token-fixture/counter harness and the new host timeline hooks. The captured build uses a separate checkout `/tmp/splash-timeline-1482`. The standalone instrumented backend object is linked ahead of the existing pinned baseline `libsplash.a`, leaving the original checkout, profiling executable and installed metallib intact. Both objects/archive and resulting executable hashes are retained in provenance.
+
+```sh
+# From the engine worktree. Preserve artifacts/current-gap, which supplies
+# the already-verified fixtures, commands and model paths.
+/Users/littlecloud/.dotnet/dotnet build src/Bootstrap.Engine -c Release -o artifacts/timeline-bin
+
+# In a clean checkout of the pinned Splash source, apply the saved patch.
+# Build/link flags used for this capture (paths below are local prerequisites):
+xcrun clang++ -std=c++20 -O3 -fobjc-arc -mmacosx-version-min=26.4 \
+  -I/tmp/splash-timeline-1482/runtime -DSPLASH_BACKEND_INSTRUMENTATION=1 \
+  -c /tmp/splash-timeline-1482/runtime/metal/MetalBackend.mm \
+  -o artifacts/dispatch-timeline/MetalBackend.o
+xcrun clang++ -std=c++20 -O3 -fobjc-arc -mmacosx-version-min=26.4 \
+  -I/tmp/splash-timeline-1482/runtime -I/tmp/splash-timeline-1482/dev \
+  /tmp/splash-timeline-1482/dev/benchmarks/decode_profile.mm \
+  artifacts/dispatch-timeline/MetalBackend.o \
+  /tmp/splash-profile-1482/build/engine/libsplash.a \
+  -framework Foundation -framework Metal -framework IOKit -framework IOSurface \
+  -o artifacts/dispatch-timeline/splash-profile
+
+# Use a fresh result directory; capture is fixed to one 10K fixture,
+# --runs 3, and --all-kernels. Do not enable BOOTSTRAP_PROFILE.
+python3 scripts/profile-dispatch-timeline.py --out artifacts/dispatch-timeline-repeat
+/tmp/qwen-prefill-plot-venv/bin/python scripts/render-dispatch-timeline.py artifacts/dispatch-timeline-repeat
+```
