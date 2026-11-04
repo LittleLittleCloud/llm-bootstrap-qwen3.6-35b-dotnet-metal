@@ -13,14 +13,39 @@ spec = importlib.util.spec_from_file_location('affine_profile', ROOT/'scripts/pr
 profile = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(profile)
 
+def validate_current(out, splash):
+    bench = out/'current-validation.mm'
+    assert not bench.exists(), 'Do not overwrite validation evidence'
+    text = profile.once((out/'bench.mm').read_text(),
+        'std::vector<Variant> variants={{"affine",oursBase},{"compact_stage",oursCompact}};',
+        'std::vector<Variant> variants={{"affine",oursBase}};')
+    bench.write_text(text)
+    build = ['xcrun', 'clang++', '-std=c++20', '-O3', '-fobjc-arc', '-mmacosx-version-min=26.4',
+             '-framework', 'Foundation', '-framework', 'Metal', '-I'+str(splash/'runtime'), str(bench), '-o', str(out/'current-validation')]
+    subprocess.run(build, check=True)
+    cmd = [str(out/'current-validation'), str(out/'profile.metal'), str(out/'moe.metal'), str(out/'dense.metal'), '0', 'all', 'forward']
+    env = os.environ.copy(); env['MTL_SHADER_VALIDATION'] = '1'
+    with (out/'validation-current.jsonl').open('w') as stdout, (out/'validation-current.stderr').open('w') as stderr:
+        result = subprocess.run(cmd, env=env, stdout=stdout, stderr=stderr)
+    (out/'validation-current-identity.json').write_text(json.dumps({'command': cmd, 'build': build,
+        'environment': {'MTL_SHADER_VALIDATION': '1'}, 'exit_code': result.returncode,
+        'source_sha256': hashlib.sha256(bench.read_bytes()).hexdigest(),
+        'binary_sha256': hashlib.sha256((out/'current-validation').read_bytes()).hexdigest()}, indent=2)+'\n')
+    result.check_returncode()
+    print('production kernels validation complete', flush=True)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--splash', type=Path, required=True)
     ap.add_argument('--out', type=Path, required=True)
+    ap.add_argument('--validate-current-only', action='store_true')
     args = ap.parse_args()
     splash, out = args.splash.resolve(), args.out.resolve()
     assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=splash, text=True).strip() == profile.PIN
     assert not subprocess.check_output(['git', 'status', '--porcelain'], cwd=splash, text=True).strip()
+    if args.validate_current_only:
+        validate_current(out, splash)
+        return
     out.mkdir(parents=True, exist_ok=False)
     hashes = profile.prepare(out, splash)
     shader = (ROOT/'native/kernels.metal').read_text()
@@ -68,7 +93,14 @@ def main():
             env.pop('MTL_DEBUG_LAYER', None)
             if label == 'validation':
                 env['MTL_SHADER_VALIDATION'] = '1'
-            subprocess.run(cmd, env=env, stdout=stdout, stderr=stderr, check=True)
+            result = subprocess.run(cmd, env=env, stdout=stdout, stderr=stderr)
+        (out/f'{label}-exit.txt').write_text(str(result.returncode))
+        if result.returncode:
+            if label != 'validation':
+                result.check_returncode()
+            print('compact diagnostic validation failed; retaining evidence and validating production kernels separately', flush=True)
+            validate_current(out, splash)
+            continue
         print(label, 'complete', flush=True)
 
 if __name__ == '__main__':

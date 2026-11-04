@@ -19,7 +19,7 @@ def read(path):
 def ours_group(label):
     name, _, shape = label.partition('|')
     p = {k: int(v) for k, v in re.findall(r'(\w+)=(\d+)', shape)}
-    if name.startswith('draft_') or p.get('K') == 16384:
+    if name.startswith('draft_') or (name.startswith(('matrix_product', 'projection_')) and p.get('K') == 16384):
         return 'Draft context'
     if name.startswith('attention_') or name in ('batch_split_q', 'batch_rope'):
         return 'Attention + preparation'
@@ -135,14 +135,14 @@ def main():
         writer.writerow(['case', 'tokens', 'kernel', 'interval_ms', 'count', 'group'])
         writer.writerows(kernel_rows)
     micro = args.root/'kernels'
-    if all((micro/f'{label}.jsonl').exists() for label in ('forward', 'reverse', 'validation')):
+    if all((micro/f'{label}.jsonl').exists() for label in ('forward', 'reverse')):
         measured = defaultdict(list)
         checks = []
-        for label in ('forward', 'reverse', 'validation'):
+        for label in ('forward', 'reverse'):
             rows = read(micro/f'{label}.jsonl')
             cc = [r for r in rows if r['type'] == 'check']
             tt = [r for r in rows if r['type'] == 'timing']
-            assert len(cc) == 30 and len(tt) == (0 if label == 'validation' else 162), (label, len(cc), len(tt))
+            assert len(cc) == 30 and len(tt) == 162, (label, len(cc), len(tt))
             checks.extend(cc)
             for r in tt:
                 measured[(r['family'], r['m'], r['k'], r['n'], r['routing'], r['variant'])].append(r['gpu_ms'])
@@ -153,11 +153,19 @@ def main():
             'cpu_reference_points_per_side': sum(r['cpu_reference_points'] for r in checks),
             'max_cpu_error_ours': max(r['ours_max_abs'] for r in checks),
             'max_cpu_error_splash': max(r['splash_max_abs'] for r in checks),
-            'compact_stage_full_output_bitwise': True,
+            'compact_stage_full_output_bitwise_in_normal_passes': True,
+            'compact_validation': {'exit_code': int((micro/'validation-exit.txt').read_text()) if (micro/'validation-exit.txt').exists() else None,
+                                   'stderr': (micro/'validation.stderr').read_text() if (micro/'validation.stderr').exists() else None},
             'samples': [dict(zip(('family', 'm', 'k', 'n', 'routing', 'variant'), key),
                              median_ms=stats.median(values), samples_ms=values)
                         for key, values in sorted(measured.items())],
         }
+        if (micro/'validation-current-identity.json').exists():
+            identity = json.loads((micro/'validation-current-identity.json').read_text())
+            assert identity['exit_code'] == 0
+            current_checks = [r for r in read(micro/'validation-current.jsonl') if r['type'] == 'check']
+            assert len(current_checks) == 18 and all(r['guards'] and r['all_live_outputs_finite'] for r in current_checks)
+            result['matched_kernels']['production_validation'] = {'check_cases': len(current_checks), 'exit_code': 0}
         (args.root/'summary.json').write_text(json.dumps(result, indent=2)+'\n')
     for name, row in result['cases'].items():
         print(name, round(row['warm_wall_ms'], 2), round(row['tokens_per_second'], 1), 'counter overhead', round(row['counter_wall_overhead_pct'], 1))

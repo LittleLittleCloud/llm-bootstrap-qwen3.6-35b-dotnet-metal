@@ -61,7 +61,7 @@ def main():
     plan.append(('ours-after', base))
     (out / 'plan.json').write_text(json.dumps(plan, indent=2)+'\n')
     env = os.environ.copy()
-    for key in ['BOOTSTRAP_PROFILE', 'SPLASH_COUNTER_TRACE_FILE', 'MTL_DEBUG_LAYER', 'MTL_SHADER_VALIDATION']:
+    for key in ['BOOTSTRAP_PROFILE', 'BOOTSTRAP_PROFILE_SHAPES', 'SPLASH_COUNTER_TRACE_FILE', 'MTL_DEBUG_LAYER', 'MTL_SHADER_VALIDATION']:
         env.pop(key, None)
     for name, cmd in plan:
         p = out / name
