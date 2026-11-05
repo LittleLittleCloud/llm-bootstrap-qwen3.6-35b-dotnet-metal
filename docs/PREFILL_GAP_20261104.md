@@ -278,3 +278,59 @@ Median wall latency decreases by **0.077%** (9.827 ms); median GPU time decrease
 **Decision:** keep this experiment opt-in. It preserves this fixture's output but does not explain the large previously observed Splash combine gap. The next more promising isolated experiment is BF16 expert-output storage, retaining FP32 accumulation: at 2048 tokens, the routed output footprint would fall from 128 MiB to 64 MiB. That precision change has not been implemented or validated by this experiment.
 
 Local evidence is in `artifacts/shared-gate/`: command/environment identities, binary/source hashes, raw logs, machine samples, `micro.csv`, `summary.json`, and `evidence-manifest.json`. Reproduce with `dotnet build src/Bootstrap.Engine -c Release -o artifacts/shared-gate-bin`, then `python3 scripts/test-shared-gate.py` using a fresh output location, and summarize with `python3 scripts/summarize-shared-gate.py artifacts/shared-gate`. The runner reuses the pinned model and prompt configuration under `artifacts/current-gap/` and refuses to overwrite existing provenance.
+
+
+## Follow-up: BF16 routed expert-output storage
+
+Tested at base `e694176`. `--bf16-expert-output` selects a BF16 write epilogue for the existing affine expert-down matmul and a BF16-reading combine kernel. The affine-8 group-64 weights, FP16 operands, FP32 matmul accumulation, FP32 combine accumulation, and shared/residual storage stay unchanged. Combine still adds shared first, then the eight routed experts in their existing order. The sigmoid experiment remains disabled. Only non-verification prefill blocks with the fused affine path and more than eight tokens use BF16; decode, speculative verification, and the eight-token suffix keep their original FP32 output path.
+
+The BF16 epilogue uses explicit valid-element stores because the installed Metal cooperative-tensor `store` requires its destination type to match the FP32 accumulator type. The production FP32 TensorOps store remains unchanged. A separate scalar FP32-store kernel is included solely as a diagnostic control.
+
+At 2048 tokens, the active routed-output range falls from 128 MiB to 64 MiB. The benchmark reuses the original allocation for both modes, so **total allocated Metal bytes remain unchanged**. There is no conversion pass and no dispatch reduction. This experiment does not change the default; the measured optimization is available through the opt-in flag.
+
+### Kernel correctness and timing
+
+Six fixtures cover 32/127/272/1259/2048 tokens, 256 affine experts, uniform and skewed distributions, and explicit live-tile counts 1/2/7/8/9/16/17/31/32. Every BF16 output equals the CPU round-to-nearest-even conversion of the corresponding FP32 output bit for bit. Combine matches the original FP32 combine supplied with these rounded values bit for bit, for separate and in-place outputs. Guard regions, sampled independent CPU dots, repeated FP32 outputs, and equality between the scalar and bulk FP32 stores are checked. Local expert-output relative L2 rounding error is approximately 0.166%; combine error is approximately 0.035% on the large fixtures.
+
+Seven warm observations per variant alternate order after one excluded warmup. Median GPU command-buffer times (ms), with input/weights already resident:
+
+| Tokens / distribution | Down FP32 | Down BF16 | Combine FP32 | Combine BF16 | Down + combine FP32 | Down + combine BF16 |
+|---|---:|---:|---:|---:|---:|---:|
+| 127 / uniform | 1.0858 | 1.0512 | 0.0229 | 0.0147 | 1.1264 | 1.0689 |
+| 272 / uniform | 1.1426 | 1.1233 | 0.0631 | 0.0301 | 1.2376 | 1.1659 |
+| 1259 / uniform | 1.7493 | 1.6856 | 0.3995 | 0.2618 | 2.1331 | 1.9148 |
+| 2048 / uniform | 2.2811 | 2.0556 | 0.6517 | 0.4312 | 2.8651 | 2.5065 |
+| 2048 / skew | 2.2748 | 2.1324 | 0.6537 | 0.4300 | 2.9181 | 2.6232 |
+
+At 2048 uniform tokens, combine latency falls 33.84%, while down + combine falls 12.52%. This isolates a useful output-storage optimization; the down epilogue also changes its store implementation, so its gain is not exclusively a measurement of bit width. These synthetic timings are not a new direct Splash benchmark.
+
+### Validation qualification
+
+Ordinary execution and Metal API-only validation pass all six down and twelve combine checks. With Metal GPU validation enabled, the **original FP32 bulk-store reference itself was nonrepeatable**: a diagnostic rerun found 476 differing elements on the tails fixture before invoking the BF16 kernel. Two initial failures and the repeated-baseline diagnostic are preserved under `validation-diagnostics/`. No confirmed driver/compiler root cause is claimed.
+
+The BF16 candidate passes all six down and twelve combine checks with API + GPU validation against the scalar FP32-store reference. The scalar reference matches the original bulk-store output bitwise under ordinary/API-only execution. Thus candidate validation succeeded through an independently checked reference; the unmodified baseline bulk-store path did not pass the GPU-instrumented repeatability check. All builds complete with zero C# warnings/errors.
+
+### Same-process 30K performance
+
+The unchanged 29,939-token fixture, tuned mask 29, FP16 KV, and draft configuration are used. Both variants warm once, then run five pairs in alternating order with prefixes cleared. No kernel counters or timeline collection is enabled. The first batch showed a 1.689% median wall reduction, but machine monitoring recorded 91.313 MiB of new swap-outs in the sampled warm timing window, so a second batch was taken. The repeat is the primary result:
+
+| Variant | Median wall, ms | Tokens/s | Median GPU command time, ms | Dispatches |
+|---|---:|---:|---:|---:|
+| FP32 output | 13154.760 | 2275.9 | 13054.126 | 16344 |
+| BF16 output | 12978.803 | 2306.8 | 12846.640 | 16344 |
+
+Repeat median wall latency improves **1.338%**, and throughput improves **1.356%**. All five pairs favor BF16 by 173.689–200.057 ms (median paired saving 188.742 ms). Both variants retain 39,939,244,032 bytes of Metal buffers. Across both batches, all ten warm pairs favor BF16, and all requests return first token 22; each variant's final logits repeat bitwise across its own requests.
+
+In the repeat, machine samples show zero new swap-outs through the last timing observation. An 83.063 MiB increase is first recorded in samples showing subsequent untimed generation checks. Sampling is approximately every two seconds, so boundary intervals cannot be assigned exactly to individual requests. No thermal warnings were sampled. Whole-process memory observations, including loading and untimed checks, are preserved rather than discarded. Use the within-batch comparisons; absolute times should not be compared with earlier experiments run under different machine conditions.
+
+### Accepting numerical differences
+
+The user clarified that bounded numerical differences are acceptable; bitwise equivalence with FP32 is not a model-quality requirement. The kernel tests above enforce correct BF16 rounding, while model acceptance considers outputs and normalized probability distributions.
+
+On the 30K fixture, BF16 changes raw final logits by relative L2 **8.002%**, maximum absolute error **1.06951**, cosine **0.996805**. This metric alone does not indicate a wrong answer. The full access code `73DY-DRV5-B8FJ` and the arithmetic smoke answer are identical, including generated token sequences, in both timing batches.
+
+Six additional deterministic acceptance probes cover the 30K needle, multiplication, sorting, extraction, counting, and a corrected-record instruction. Both modes pass all six; complete generated token sequences and first-token argmax agree. First-token logits are captured before decode in a non-timed generation callback. Across these probes, maximum softmax KL is **8.252e-5 nats**, and maximum total variation distance is **0.0003274**. These are local acceptance probes, not a broad task-accuracy evaluation.
+
+For 30K specifically, softmax KL is **0.00002982 nats**, total variation is **0.00008743**, and the baseline-selected first-token probability changes from **99.97426% to 99.98281%**. The observed numerical difference is acceptable on these tested tasks, and the candidate provides a small, consistent end-to-end speed gain.
+
+Local evidence: `artifacts/expert-output/` contains both timing batches, ordinary/API/GPU checks, the qualification diagnostics, six-task quality outputs, source/binary hashes, memory observations, `micro.csv`, `summary.json`, and `evidence-manifest.json`. The extra quality diagnostics were built separately under `artifacts/expert-output-quality-bin`; both builds use identical inference shaders. Reproduce with `dotnet build src/Bootstrap.Engine -c Release -o artifacts/expert-output-bin`, then `python3 scripts/test-expert-output.py` in a fresh result location, and `python3 scripts/summarize-expert-output.py artifacts/expert-output`. The runner uses the pinned model/prompt configuration from `artifacts/current-gap/` and refuses to overwrite existing provenance.

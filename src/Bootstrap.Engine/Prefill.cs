@@ -2,6 +2,8 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    bool bf16ExpertOutput;
+    public bool Bf16ExpertOutput { get => bf16ExpertOutput; set { if (bf16ExpertOutput != value) { ClearPrefixCache(); bf16ExpertOutput = value; } } }
     bool precomputeSharedGate;
     public bool PrecomputeSharedGate { get => precomputeSharedGate; set { if (precomputeSharedGate != value) { ClearPrefixCache(); precomputeSharedGate = value; } } }
     string projectionPreparation = "baseline";
@@ -324,6 +326,9 @@ internal sealed partial class QwenEngine
                 string kernel = tiny ? "expert_matrix_tiny" : ProjectionKernel("expert_matrix") + (optimized ? "_tile" + (tileRows == 16 ? "" : tileRows.ToString()) + (choice == 2 ? "_down" : "_up") : "");
                 gpu.Dispatch2D(kernel, new() { N = rows, K = columns, Kind = choice, Flags = ExpertLayoutFlags }, tiny ? rows * 32 : ((rows + 63) / 64) * threads, tileLimit, threads, input, raw, descriptors[layer], b.Tiles, b.TileCount, b.SortedTokens, result);
             }
+            // Reuse the existing buffer so same-process comparisons have identical allocations.
+            // BF16 writes/reads only its first half; tiny/verification paths still use FP32.
+            bool bf16Output = !verify && Bf16ExpertOutput && Affine8 && stagedExperts && ExpertKernel == "fused";
             if (stagedExperts && ExpertKernel == "fused") {
                 b.PackedExpertInputs ??= Buffer(b.Capacity * 8 * Hidden / 2);
                 var p = new KernelArgs { M = (uint)count * 8, N = 512, K = Hidden };
@@ -331,7 +336,7 @@ internal sealed partial class QwenEngine
                 // The activation buffer is deliberately FP16 on this path. Down reads
                 // it directly; no global gate/up outputs or activation repack needed.
                 gpu.Dispatch2D(Affine8 ? "expert_gate_up_affine" : PackedExperts ? "ablation_gate_up_packed" : "expert_gate_up_staged", p, 16 * 64, tileLimit, 64, b.PackedExpertInputs, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertActivation);
-                gpu.Dispatch2D(Affine8 ? "expert_matrix_affine" : PackedExperts ? "ablation_matrix_packed" : "expert_matrix_staged", new() { N = Hidden, K = 512, Kind = 2 }, (Hidden / 64) * 64, tileLimit, 64, b.ExpertActivation, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertOutput);
+                gpu.Dispatch2D(Affine8 ? (bf16Output ? "expert_matrix_affine_bf16_output" : "expert_matrix_affine") : PackedExperts ? "ablation_matrix_packed" : "expert_matrix_staged", new() { N = Hidden, K = 512, Kind = 2 }, (Hidden / 64) * 64, tileLimit, 64, b.ExpertActivation, raw, descriptors[layer], b.Tiles, b.TileCount, b.ExpertOutput);
             } else {
                 ExpertProjection(0, 512, Hidden, b.Norm, b.ExpertGate); ExpertProjection(1, 512, Hidden, b.Norm, b.ExpertUp);
                 gpu.Dispatch("silu_product", new() { N = checked((uint)count * 8 * 512) }, checked((uint)count * 8 * 512), 128, b.ExpertGate, b.ExpertUp, b.ExpertActivation);
@@ -350,7 +355,7 @@ internal sealed partial class QwenEngine
             if (!fusedShared) gpu.Dispatch("silu_product", new() { N = checked((uint)count * 512) }, checked((uint)count * 512), 128, b.SharedGate, b.SharedUp, b.SharedActivation);
             BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count, packedInput: fusedShared ? sharedPackedActivation : null);
             if (!earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, sigmoidOutput: gateReady);
-            gpu.Dispatch(gateReady ? "batch_mix_precomputed_gate" : "batch_mix", new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
+            gpu.Dispatch((gateReady ? "batch_mix_precomputed_gate" : "batch_mix") + (bf16Output ? "_bf16_expert" : ""), new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
             ActiveDraft?.Capture(layer, b.Hidden, count);
         }
         if (!verify) ActiveDraft?.CommitFeatures(count, position);
