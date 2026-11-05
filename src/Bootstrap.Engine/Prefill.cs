@@ -176,7 +176,7 @@ internal sealed partial class QwenEngine
         string kernel = ProjectionKernel(small ? "matrix_product_small" : "matrix_product") + (!small && OptimizedProjections && TensorOpsPrecision == "fp16" ? "_tile" : "");
         gpu.Dispatch2D(kernel, new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, checked((uint)((tensor.Shape[0] + (small ? 31 : 63)) / (small ? 32 : 64) * threads)), checked((uint)((count + (small ? 15 : 31)) / (small ? 16 : 32))), threads, input, tensor.Binding, scales, output);
     }
-    int PrefillBlock(ReadOnlySpan<int> tokens, int position, bool output, bool ignoreEos, bool verify = false)
+    int PrefillBlock(ReadOnlySpan<int> tokens, int position, bool output, bool ignoreEos, bool verify = false, bool captureDraft = true)
     {
         if (batch is null) { batch = new BatchBuffers(this); Console.Error.WriteLine("Batched FP32 prefill workspace ready; Metal buffer bytes=" + gpu.AllocatedBytes); }
         // Large prefill tiles are inefficient for the 1-8-row speculative verifier.
@@ -184,7 +184,9 @@ internal sealed partial class QwenEngine
         var b = batch; int count = tokens.Length; tokens.CopyTo(b.Tokens.Values<int>(count));
         if (count > b.Capacity) throw new ArgumentException("Batch exceeds allocated workspace");
         EnsureCacheCapacity(position + count);
-        ActiveDraft?.EnsureFeatureCapacity(count);
+        if (verify && !captureDraft) throw new ArgumentException("Verification must capture draft features");
+        var blockDraft = captureDraft ? ActiveDraft : null;
+        blockDraft?.EnsureFeatureCapacity(count);
         bool optimizedDelta = !verify && count > VerificationCapacity && DeltaMode != "baseline";
         bool packedNorm = !verify && PackNormalizedInput(count);
         if (optimizedDelta) b.DeltaGates ??= Buffer(b.Capacity * 64);
@@ -363,9 +365,9 @@ internal sealed partial class QwenEngine
             BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count, packedInput: fusedShared ? sharedPackedActivation : null);
             if (!earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, sigmoidOutput: gateReady);
             gpu.Dispatch((gateReady ? "batch_mix_precomputed_gate" : "batch_mix") + (bf16Output ? "_bf16_expert" : ""), new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
-            ActiveDraft?.Capture(layer, b.Hidden, count);
+            blockDraft?.Capture(layer, b.Hidden, count);
         }
-        if (!verify) ActiveDraft?.CommitFeatures(count, position);
+        if (!verify) blockDraft?.CommitFeatures(count, position);
         if (verify)
         {
             var verificationBuffers = verification!;

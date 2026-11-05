@@ -199,6 +199,7 @@ internal sealed partial class QwenEngine : IDisposable
         {
             cancellation.ThrowIfCancellationRequested();
             int position = RestorePrefix(prompt, ignoreEos, out int predicted);
+            LastDraftPrefillRows = 0;
             int cachedTokens = position;
             var boundaries = PrefixBoundaries(prompt);
             // Own the token key: callers may reuse/mutate their input array after return.
@@ -211,7 +212,14 @@ internal sealed partial class QwenEngine : IDisposable
                 bool checkpoint = position + count == boundary;
                 if (BatchedPrefill && count >= 8)
                 {
-                    predicted = PrefillBlock(prompt.AsSpan(position, count), position, checkpoint, ignoreEos);
+                    // A saved prefix and final generation each need their last draft
+                    // window. Earlier chunks will be overwritten before any consumer.
+                    // Retain whole intersecting chunks so FC shapes/arithmetic stay
+                    // identical, including the small-block projection selection.
+                    int draftRequiredEnd = PrefixCachingEnabled ? boundary : prompt.Length;
+                    bool captureDraft = !WindowedDraftPrefill || position + count > draftRequiredEnd - DFlashDraft.Window;
+                    predicted = PrefillBlock(prompt.AsSpan(position, count), position, checkpoint, ignoreEos, captureDraft: captureDraft);
+                    if (captureDraft && ActiveDraft is not null) LastDraftPrefillRows += count;
                     position += count;
                 }
                 else
@@ -219,6 +227,7 @@ internal sealed partial class QwenEngine : IDisposable
                     // Sequential kernels advance one token regardless of the planned tile.
                     checkpoint = position + 1 == boundary;
                     predicted = Forward(prompt[position], position, checkpoint, ignoreEos); position++;
+                    if (ActiveDraft is not null) LastDraftPrefillRows++;
                 }
                 cancellation.ThrowIfCancellationRequested();
                 if (checkpoint) SavePrefix(position, boundaries);

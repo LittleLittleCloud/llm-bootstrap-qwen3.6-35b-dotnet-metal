@@ -37,11 +37,11 @@ if (command == "tensorops-self-test") { TensorOpsSelfTest.Run(File.ReadAllText(k
 if (command == "profile-fast-attention") { FastAttentionTests.Run(File.ReadAllText(Option("--kernel-file") ?? kernelFile), int.Parse(Option("--runs") ?? "3"), args.Contains("--attention-tiles"), Option("--kv-cache-precision") == "fp16"); return; }
 if (command == "profile-attention") { AttentionWallProfile.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--tiled-attention")); return; }
 if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
-if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "compare-dispatch-fusion" or "compare-shared-gate" or "compare-expert-output" or "check-expert-output-quality" or "check-kv-quality" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "compare-dispatch-fusion" or "compare-shared-gate" or "compare-draft-prefill" or "check-draft-prefill" or "compare-expert-output" or "check-expert-output-quality" or "check-kv-quality" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "compare-dispatch-fusion" or "compare-shared-gate" or "compare-expert-output" or "check-expert-output-quality" or "check-kv-quality" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test")
+    if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "compare-dispatch-fusion" or "compare-shared-gate" or "compare-draft-prefill" or "check-draft-prefill" or "compare-expert-output" or "check-expert-output-quality" or "check-kv-quality" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test")
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
         bool tunedPrefill = args.Contains("--tuned-prefill");
@@ -72,6 +72,15 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.ExpertTileRows = int.Parse(Option("--expert-tile-rows") ?? (tunedPrefill ? "64" : "16"));
         engine.BatchedPrefill = !args.Contains("--sequential-prefill");
         engine.PrefixCachingEnabled = !args.Contains("--no-prefix-cache");
+        engine.WindowedDraftPrefill = !args.Contains("--full-draft-prefill");
+        if (command == "check-draft-prefill") { engine.CheckDraftPrefill(); if (args.Contains("--prefix-checks")) PrefixCacheSelfTest.Run(engine); return; }
+        if (command == "compare-draft-prefill") {
+            foreach (string name in new[] { "--prompt-file", "--long-prompt-file" }) {
+                var file = Option(name); if (file is null) continue;
+                engine.CompareDraftPrefill(File.ReadAllText(file), int.Parse(Option("--runs") ?? "5"), args.Contains("--reverse-order"));
+            }
+            return;
+        }
         if (command == "moe-self-tests") {
             if (args.Contains("--packed-model-check")) {
                 engine.PackedExpertModelCheck(File.ReadAllText(Option("--prompt-file")!), File.ReadAllText(Option("--long-prompt-file")!), Option("--expected-answer")!, int.Parse(Option("--runs") ?? "3"), Option("--output-dir")!);

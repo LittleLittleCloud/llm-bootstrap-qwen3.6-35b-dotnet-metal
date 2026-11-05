@@ -22,6 +22,14 @@ internal sealed partial class QwenEngine
     }
 
     public bool DraftLoaded => draft is not null;
+    bool windowedDraftPrefill = true;
+    public bool WindowedDraftPrefill
+    {
+        get => windowedDraftPrefill;
+        set { if (windowedDraftPrefill != value) ClearPrefixCache(); windowedDraftPrefill = value; }
+    }
+    public int LastDraftPrefillRows { get; private set; }
+
     public void DraftSelfTest(string directory, int context = 16)
     {
         if (draft is null) throw new InvalidOperationException("--draft-dir is required");

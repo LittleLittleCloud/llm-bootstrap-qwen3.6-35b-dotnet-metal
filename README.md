@@ -223,7 +223,13 @@ EOS, stop strings and cancellation still apply.
 Draft context is bounded by the checkpoint's 2048-token sliding window; this does
 not reduce the target's native context window. Prefix checkpoints additionally
 save the 16 MiB projected draft context. Restoring a prefix rebuilds draft KV from
-that context. The correctness-first verifier currently reserves about 503 MiB for
+that context. Batched prefill skips draft feature capture and projection for whole
+chunks outside the windows needed by upcoming prefix checkpoints and generation.
+Intersecting chunks retain their original projection shapes and precision; target
+prefill, decode and verification remain unchanged. Use `--full-draft-prefill` to
+restore full-prompt draft processing for comparison. See
+[draft prefill controls and measurements](docs/DRAFT_CONTEXT_PREFILL_20261105.md).
+The correctness-first verifier currently reserves about 503 MiB for
 per-row hybrid-state snapshots plus logits; draft weights and workspace add more
 memory. These allocations are in addition to growing target KV. No OS memory
 settings or weight precision are changed. Omit `--draft-dir` for serial decode.
