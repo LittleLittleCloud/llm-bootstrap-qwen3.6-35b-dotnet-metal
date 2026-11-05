@@ -61,7 +61,7 @@ internal sealed partial class QwenEngine
             hidden = B(8 * Hidden); norm = B(8 * Hidden); prepared = B(8 * Hidden); dynamic = B(8 * 512); output = B(8 * Hidden);
             q = B(8 * 4096); k = B(8 * 1024); v = B(8 * 1024); attention = B(8 * 4096); scores = B(8 * 32 * (Window + 8));
             gate = B(8 * 6144); up = B(8 * 6144); activation = B(8 * 6144); logits = B(8 * Vocabulary); selector = B(8 * 256); tokens = B(8); proposals = B(8);
-            for (int l = 0; l < 6; l++) { keys[l] = B(Window * 1024 * e.KvElementBytes / 4); values[l] = B(Window * 1024 * e.KvElementBytes / 4); }
+            for (int l = 0; l < 6; l++) { keys[l] = B(Window * 1024 * e.DraftKvElementBytes / 4); values[l] = B(Window * 1024 * e.DraftKvElementBytes / 4); }
         }
         public void Reset(int position = 0) { contextEnd = position; cachedThrough = Math.Max(0, position - Window); }
         public void EnsureFeatureCapacity(int count)
@@ -126,7 +126,7 @@ internal sealed partial class QwenEngine
                 e.gpu.Dispatch("draft_context_load", new() { M = (uint)count, Position = (uint)start }, (uint)(count * Hidden), 128, Context, contextInput);
                 Project(path + ".k_proj", contextInput, contextK, count); Project(path + ".v_proj", contextInput, contextV, count);
                 Normalize(path + ".k_norm", contextK, contextK, 128, count * 8);
-                e.gpu.Dispatch("draft_context_kv", new() { M = (uint)count, Position = (uint)start, Theta = 10_000_000f, Flags = e.KvFlags }, (uint)(count * 1024), 128, contextK, contextV, keys[layer], values[layer]);
+                e.gpu.Dispatch("draft_context_kv", new() { M = (uint)count, Position = (uint)start, Theta = 10_000_000f, Flags = e.DraftKvFlags }, (uint)(count * 1024), 128, contextK, contextV, keys[layer], values[layer]);
             }
         }
         public int[] Propose(int anchor, int position, int count)
@@ -143,7 +143,7 @@ internal sealed partial class QwenEngine
                 Convolve(path + ".attention_conv", norm, prepared, count, false);
                 Project(path + ".self_attn.q_proj", prepared, q, count); Project(path + ".self_attn.k_proj", prepared, k, count); Project(path + ".self_attn.v_proj", prepared, v, count);
                 Normalize(path + ".self_attn.q_norm", q, q, 128, count * 32); Normalize(path + ".self_attn.k_norm", k, k, 128, count * 8);
-                var p = new KernelArgs { M = (uint)count, Position = (uint)position, A = (uint)Math.Min(Window, position), K = (uint)(Math.Min(Window, position) + count), Theta = 10_000_000f, Flags = e.KvFlags };
+                var p = new KernelArgs { M = (uint)count, Position = (uint)position, A = (uint)Math.Min(Window, position), K = (uint)(Math.Min(Window, position) + count), Theta = 10_000_000f, Flags = e.DraftKvFlags };
                 e.gpu.Dispatch("draft_rotate", p, (uint)(count * 2048), 128, q, k);
                 e.gpu.Dispatch("draft_attention_scores", p, (uint)(count * 32) * p.K * 32, 128, q, k, keys[layer], scores);
                 var softmax = p; softmax.Position = p.K - 1;

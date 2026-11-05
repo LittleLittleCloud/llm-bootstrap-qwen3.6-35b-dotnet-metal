@@ -21,11 +21,11 @@ def ours_group(label):
     p = {k: int(v) for k, v in re.findall(r'(\w+)=(\d+)', shape)}
     if name.startswith('draft_') or (name.startswith(('matrix_product', 'projection_')) and p.get('K') == 16384):
         return 'Draft context'
-    if name.startswith('attention_') or name in ('batch_split_q', 'batch_rope'):
+    if name.startswith(('attention_', 'batch_attention_', 'batch_rope')) or name == 'batch_split_q':
         return 'Attention + preparation'
     if name.startswith(('delta_', 'batch_conv')) or name in ('batch_delta', 'batch_l2') or (name == 'rmsnorm_pack' and p.get('Flags', 0) & 2):
         return 'DeltaNet + preparation'
-    if name.startswith('expert_') or name in ('batch_router', 'batch_mix', 'batch_mix_vec4', 'shared_gate_up_pack'):
+    if name.startswith(('expert_', 'batch_mix')) or name in ('batch_router', 'shared_gate_up_pack'):
         return 'MoE incl shared / routing / combine'
     if p and (name.startswith(('projection_', 'matrix_product'))):
         if (p.get('N') in (1, 256) or (p.get('N') == 2048 and p.get('K') == 512)

@@ -136,7 +136,16 @@ internal sealed partial class QwenEngine
             }
             else
             {
-                Add(keyCache[layer], consumed * 512 * KvElementBytes); Add(valueCache[layer], consumed * 512 * KvElementBytes);
+                Add(keyCache[layer], consumed * 512 * KvElementBytes);
+                if (Int8Kv)
+                {
+                    int pages = consumed / 256, tail = consumed % 256;
+                    Add(valueCache[layer], pages * 256 * 512);
+                    for (int head = 0; head < 2; head++) for (int d = 0; d < 256; d++)
+                        if (tail > 0) hash.AppendData(valueCache[layer].Values<byte>(tail, (ulong)((pages * 2 + head) * 65536 + d * 256)));
+                }
+                else Add(valueCache[layer], consumed * 512 * KvElementBytes);
+                if (Int8Kv) { Add(keyScale[layer], consumed * 2 * sizeof(float)); Add(valueScale[layer], consumed * 2 * sizeof(float)); }
             }
         Add(logits, Vocabulary * sizeof(float));
         if (ActiveDraft is { } drafting)

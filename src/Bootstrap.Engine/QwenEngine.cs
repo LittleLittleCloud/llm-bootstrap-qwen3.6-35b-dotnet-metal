@@ -15,15 +15,20 @@ internal sealed partial class QwenEngine : IDisposable
     public int CacheCapacity => cacheCapacity;
     public string KvCachePrecision { get; }
     bool HalfKv => KvCachePrecision == "fp16";
-    int KvElementBytes => HalfKv ? 2 : 4;
+    bool Int8Kv => KvCachePrecision == "int8";
+    int KvElementBytes => Int8Kv ? 1 : HalfKv ? 2 : 4;
+    int DraftKvElementBytes => KvCachePrecision == "fp32" ? 4 : 2;
+    uint DraftKvFlags => DraftKvElementBytes == 2 ? 256u : 0u;
     uint KvFlags => HalfKv ? 256u : 0u;
-    public ulong TargetKvBytes => (ulong)cacheCapacity * 512 * 20 * (ulong)KvElementBytes;
+    static int Int8ValueCapacity(int capacity) => checked((capacity + 255) / 256 * 256);
+    public ulong TargetKvBytes => (ulong)cacheCapacity * 512 * 20 * (ulong)KvElementBytes + (Int8Kv ? (ulong)cacheCapacity * 2 * 20 * 4 + (ulong)(Int8ValueCapacity(cacheCapacity) - cacheCapacity) * 512 * 10 : 0);
     public static int ValidateContextWindow(int contextWindow) => contextWindow is >= 1 and <= MaximumContextWindow ? contextWindow : throw new ArgumentOutOfRangeException(nameof(contextWindow), "Context window must fit the model's native 262144-token window");
     readonly Metal gpu;
     readonly Checkpoint weights;
     readonly List<GpuBuffer> owned = new();
     readonly GpuBuffer x, norm, attention, projection, qkv, z, a, b, conv, q, k, rotated, qgate, v, router, ids, rates, expertActivation, expertOutput, sharedGate, sharedUp, sharedActivation, sharedOutput, sharedWeight, logits, next, dummy;
     readonly GpuBuffer[] state = new GpuBuffer[40], convolution = new GpuBuffer[40], keyCache = new GpuBuffer[40], valueCache = new GpuBuffer[40], descriptors = new GpuBuffer[40];
+    readonly GpuBuffer[] keyScale = new GpuBuffer[40], valueScale = new GpuBuffer[40];
     public ByteBpe Tokenizer { get; }
     public ulong AllocatedBytes => gpu.AllocatedBytes;
     GpuBuffer Buffer(int floats) { var result = gpu.Allocate(checked((ulong)floats * 4)); owned.Add(result); return result; }
@@ -32,7 +37,7 @@ internal sealed partial class QwenEngine : IDisposable
     uint ExpertLayoutFlags => (PackedExperts ? 1024u : 0u) | (Affine8 ? 2048u : 0u);
     public QwenEngine(string directory, string kernelPath, string manifestPath, int contextWindow = DefaultContextWindow, string kvCachePrecision = "fp32", bool packedExperts = false, string? affineCache = null)
     {
-        if (kvCachePrecision is not ("fp16" or "fp32")) throw new ArgumentException("KV cache precision must be fp16 or fp32");
+        if (kvCachePrecision is not ("int8" or "fp16" or "fp32")) throw new ArgumentException("KV cache precision must be int8, fp16 or fp32");
         KvCachePrecision = kvCachePrecision;
         Context = ValidateContextWindow(contextWindow);
         cacheCapacity = Math.Min(Context, 4096);
@@ -53,7 +58,7 @@ internal sealed partial class QwenEngine : IDisposable
         for (int layer = 0; layer < 40; layer++)
         {
             if ((layer + 1) % 4 != 0) { state[layer] = Buffer(32 * 128 * 128); convolution[layer] = Buffer(3 * 8192); }
-            else { keyCache[layer] = Buffer(cacheCapacity * 512 * KvElementBytes / 4); valueCache[layer] = Buffer(cacheCapacity * 512 * KvElementBytes / 4); }
+            else { keyCache[layer] = Buffer(cacheCapacity * 512 * KvElementBytes / 4); valueCache[layer] = Buffer((Int8Kv ? Int8ValueCapacity(cacheCapacity) : cacheCapacity) * 512 * KvElementBytes / 4); if (Int8Kv) { keyScale[layer] = Buffer(cacheCapacity * 2); valueScale[layer] = Buffer(cacheCapacity * 2); } }
             descriptors[layer] = Buffer(256 * 6 * 2);
             var table = descriptors[layer].Values<ulong>(256 * 6);
             string prefix = Prefix(layer) + ".mlp.experts.";
@@ -85,7 +90,8 @@ internal sealed partial class QwenEngine : IDisposable
         for (int layer = 3; layer < 40; layer += 4)
         {
             Grow(ref keyCache[layer], checked(capacity * 512), KvElementBytes);
-            Grow(ref valueCache[layer], checked(capacity * 512), KvElementBytes);
+            Grow(ref valueCache[layer], checked((Int8Kv ? Int8ValueCapacity(capacity) : capacity) * 512), KvElementBytes);
+            if (Int8Kv) { Grow(ref keyScale[layer], checked(capacity * 2)); Grow(ref valueScale[layer], checked(capacity * 2)); }
         }
         Grow(ref scores, checked(capacity * 16));
         cacheCapacity = capacity;
@@ -121,7 +127,7 @@ internal sealed partial class QwenEngine : IDisposable
         gpu.Begin();
         for (int l = 0; l < 40; l++)
             if ((l + 1) % 4 != 0) { gpu.Clear(state[l]); gpu.Clear(convolution[l]); }
-            else { gpu.Clear(keyCache[l]); gpu.Clear(valueCache[l]); }
+            else { gpu.Clear(keyCache[l]); gpu.Clear(valueCache[l]); if (Int8Kv) { gpu.Clear(keyScale[l]); gpu.Clear(valueScale[l]); } }
         gpu.End();
     }
     public int Forward(int token, int position, bool output, bool ignoreEos)
@@ -150,10 +156,21 @@ internal sealed partial class QwenEngine : IDisposable
                 gpu.Dispatch("split_q", new(), 4096, 128, qkv, q, qgate);
                 Normalize(q, path + ".q_norm", q, 256, 16); Normalize(k, path + ".k_norm", k, 256, 2);
                 var attentionArgs = new KernelArgs { Position = (uint)position, K = (uint)cacheCapacity, Theta = 10_000_000f, Flags = KvFlags };
+                if (Int8Kv)
+                {
+                    attentionArgs.M = 1; attentionArgs.K = (uint)(position + 1);
+                    gpu.Dispatch("batch_rope_int8", attentionArgs, 4096, 256, q, k, v, rotated, keyCache[layer], valueCache[layer], keyScale[layer], valueScale[layer]);
+                    gpu.Dispatch2D("batch_attention_scores_int8", attentionArgs, (uint)(position + 1) * 32, 16, 128, rotated, keyCache[layer], scores, keyScale[layer]);
+                    gpu.Dispatch("attention_softmax", attentionArgs, 16 * 256, 256, scores);
+                    gpu.Dispatch("batch_attention_values_int8", attentionArgs, 4096, 128, scores, valueCache[layer], qgate, attention, valueScale[layer]);
+                }
+                else
+                {
                 gpu.Dispatch("rope_cache", attentionArgs, 4096, 128, q, k, v, rotated, keyCache[layer], valueCache[layer]);
                 gpu.Dispatch("attention_scores", attentionArgs, checked((uint)(16 * (position + 1) * 32)), 128, rotated, keyCache[layer], scores);
                 gpu.Dispatch("attention_softmax", attentionArgs, 16 * 256, 256, scores);
                 gpu.Dispatch("attention_values", attentionArgs, 4096, 128, scores, valueCache[layer], qgate, attention);
+                }
                 Project(path + ".o_proj", attention, projection);
             }
             Add(x, projection); Normalize(x, prefix + ".post_attention_layernorm", norm);
