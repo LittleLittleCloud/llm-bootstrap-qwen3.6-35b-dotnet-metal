@@ -802,3 +802,20 @@ hold metadata layout/traffic, packed payload layout, TensorOps tiles, activation
 and output precision, grid, and safe math mode fixed. An unchanged packed kernel
 is timed alongside the generated variants. No checkpoint is requantized.
 See [EXPERT_QUANTIZATION_CONTROL.md](docs/EXPERT_QUANTIZATION_CONTROL.md).
+
+## BF16 expert-output prefill experiment
+
+`--bf16-expert-output` narrows routed expert-down outputs on the fused affine-8
+prefill path while retaining FP32 matmul and combine accumulation. Add it to the
+existing `--tuned-prefill --affine-cache ... --delta-mode staged8` serving command.
+Shared outputs and residuals remain FP32. The flag does not affect decode,
+speculative verification or verification-sized prefill batches. It is opt-in;
+changing it invalidates reusable prefixes.
+
+On the local 29,939-token fixture, five alternating warm pairs reduced median
+latency from 13.155 to 12.979 seconds (1.34%). Six targeted task checks produced
+identical full token sequences; raw logits differ, as expected from BF16 rounding.
+These are development results, not a formal endpoint evaluation. The
+[prefill comparison and precision report](docs/PREFILL_GAP_20261104.md) includes
+both timing batches, the Metal validation-reference qualification, rejected
+fusion/sigmoid experiments, and reproducible diagnostics.
