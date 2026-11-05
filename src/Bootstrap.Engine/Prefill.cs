@@ -176,7 +176,7 @@ internal sealed partial class QwenEngine
         string kernel = ProjectionKernel(small ? "matrix_product_small" : "matrix_product") + (!small && OptimizedProjections && TensorOpsPrecision == "fp16" ? "_tile" : "");
         gpu.Dispatch2D(kernel, new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, checked((uint)((tensor.Shape[0] + (small ? 31 : 63)) / (small ? 32 : 64) * threads)), checked((uint)((count + (small ? 15 : 31)) / (small ? 16 : 32))), threads, input, tensor.Binding, scales, output);
     }
-    int PrefillBlock(ReadOnlySpan<int> tokens, int position, bool output, bool ignoreEos, bool verify = false)
+    int PrefillBlock(ReadOnlySpan<int> tokens, int position, bool output, bool ignoreEos, bool verify = false, bool captureDraft = true)
     {
         if (batch is null) { batch = new BatchBuffers(this); Console.Error.WriteLine("Batched FP32 prefill workspace ready; Metal buffer bytes=" + gpu.AllocatedBytes); }
         // Large prefill tiles are inefficient for the 1-8-row speculative verifier.
@@ -184,7 +184,9 @@ internal sealed partial class QwenEngine
         var b = batch; int count = tokens.Length; tokens.CopyTo(b.Tokens.Values<int>(count));
         if (count > b.Capacity) throw new ArgumentException("Batch exceeds allocated workspace");
         EnsureCacheCapacity(position + count);
-        ActiveDraft?.EnsureFeatureCapacity(count);
+        if (verify && !captureDraft) throw new ArgumentException("Verification must capture draft features");
+        var blockDraft = captureDraft ? ActiveDraft : null;
+        blockDraft?.EnsureFeatureCapacity(count);
         bool optimizedDelta = !verify && count > VerificationCapacity && DeltaMode != "baseline";
         bool packedNorm = !verify && PackNormalizedInput(count);
         if (optimizedDelta) b.DeltaGates ??= Buffer(b.Capacity * 64);
@@ -192,7 +194,7 @@ internal sealed partial class QwenEngine
             b.DeltaReferenceState ??= Buffer(524288);
             b.DeltaReferenceOutput ??= Buffer(b.Capacity * 4096);
         }
-        if (!verify && (AttentionMode is "fp16-device" or "fp16-online")) { deviceAttention ??= new(gpu); deviceAttention.Prepare(count, position + count, HalfKv, AttentionMode == "fp16-online"); }
+        if (!verify && (Int8Kv || AttentionMode is "fp16-device" or "fp16-online")) { deviceAttention ??= new(gpu); deviceAttention.Prepare(count, position + count, HalfKv || Int8Kv, Int8Kv || AttentionMode == "fp16-online"); }
         if (!verify) PrepareDispatchFusion(count);
         gpu.Begin();
         BatchEmbed(b.Tokens, b.Hidden, count);
@@ -244,19 +246,24 @@ internal sealed partial class QwenEngine
                 if (!verify && FuseDispatch(4, count)) BatchProjectMany([path + ".q_proj", path + ".k_proj", path + ".v_proj"], [b.Qkv, b.K, b.V], b.Norm, count, packedNorm);
                 else { BatchProject(path + ".q_proj", b.Norm, b.Qkv, count, reusePackedInput: packedNorm); BatchProject(path + ".k_proj", b.Norm, b.K, count, reusePackedInput: true); BatchProject(path + ".v_proj", b.Norm, b.V, count, reusePackedInput: true); }
                 var p = new KernelArgs { M = (uint)count, Position = (uint)position, K = (uint)(position + count), Theta = 10_000_000f, Flags = KvFlags, Epsilon = 1e-6f };
-                bool preparedAttention = !verify && FuseDispatch(16, count) && HalfKv && AttentionMode == "fp16-online" && count >= 32;
-                if (preparedAttention) gpu.Dispatch("attention_prepare_fused", p, (uint)count * 18 * 256, 256, b.Qkv, b.K, b.V,
+                bool preparedAttention = !verify && FuseDispatch(16, count) && (HalfKv || Int8Kv) && (Int8Kv || AttentionMode == "fp16-online") && count >= 32;
+                if (preparedAttention && Int8Kv) gpu.Dispatch("attention_prepare_fused_int8", p, (uint)count * 18 * 256, 256, b.Qkv, b.K, b.V,
+                    weights[path + ".q_norm.weight"].Binding, weights[path + ".k_norm.weight"].Binding, deviceAttention!.PackedQuery, b.Qgate, keyCache[layer], valueCache[layer], keyScale[layer], valueScale[layer]);
+                else if (preparedAttention) gpu.Dispatch("attention_prepare_fused", p, (uint)count * 18 * 256, 256, b.Qkv, b.K, b.V,
                     weights[path + ".q_norm.weight"].Binding, weights[path + ".k_norm.weight"].Binding, deviceAttention!.PackedQuery, b.Qgate, keyCache[layer], valueCache[layer]);
                 else {
                     gpu.Dispatch("batch_split_q", new() { M = (uint)count }, checked((uint)count * 4096), 128, b.Qkv, b.Q, b.Qgate);
                     Normalize(b.Q, path + ".q_norm", b.Q, 256, checked((uint)count * 16)); Normalize(b.K, path + ".k_norm", b.K, 256, checked((uint)count * 2));
-                    gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
+                    if (Int8Kv) gpu.Dispatch("batch_rope_int8", p, checked((uint)count * 4096), 256, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer], keyScale[layer], valueScale[layer]);
+                    else gpu.Dispatch("batch_rope", p, checked((uint)count * 4096), 128, b.Q, b.K, b.V, b.Rotated, keyCache[layer], valueCache[layer]);
                 }
-                if (!verify && AttentionMode == "fp16-online")
+                if (!verify && Int8Kv)
+                    deviceAttention!.EncodeInt8(b.Rotated, keyCache[layer], valueCache[layer], keyScale[layer], valueScale[layer], b.Qgate, b.Rotated, count, position, preparedAttention);
+                else if (!verify && AttentionMode == "fp16-online")
                     deviceAttention!.EncodeOnline(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position, HalfKv, preparedAttention);
                 else if (!verify && AttentionMode == "fp16-device")
                     deviceAttention!.Encode(b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Scores, b.Rotated, count, position, HalfKv, CausalDeviceAttention);
-                else if (AttentionMode == "fused-fp16")
+                else if (!Int8Kv && AttentionMode == "fused-fp16")
                     gpu.Dispatch2D("batch_attention_fused_fp16", p, (uint)((count + 15) / 16) * 128, 16, 128, b.Rotated, keyCache[layer], valueCache[layer], b.Qgate, b.Rotated);
                 else
                 {
@@ -270,11 +277,13 @@ internal sealed partial class QwenEngine
                         var attention = p; attention.M = (uint)rows; attention.Position = (uint)(position + first);
                         var query = new Binding(b.Rotated, (ulong)first * 4096 * 4);
                         var gate = new Binding(b.Qgate, (ulong)first * 4096 * 4);
-                        if (useTiledAttention) gpu.Dispatch2D(AttentionKernel("batch_attention_scores_tiled"), attention, (uint)((position + count + 31) / 32) * 128, (uint)((rows + 15) / 16) * 16, 128, query, keyCache[layer], b.Scores);
+                        if (Int8Kv) gpu.Dispatch2D("batch_attention_scores_int8", attention, (uint)(position + count) * 32, (uint)rows * 16, 128, query, keyCache[layer], b.Scores, keyScale[layer]);
+                        else if (useTiledAttention) gpu.Dispatch2D(AttentionKernel("batch_attention_scores_tiled"), attention, (uint)((position + count + 31) / 32) * 128, (uint)((rows + 15) / 16) * 16, 128, query, keyCache[layer], b.Scores);
                         else gpu.Dispatch2D("batch_attention_scores", attention, (uint)(position + count) * 32, (uint)rows * 16, 128, query, keyCache[layer], b.Scores);
                         var normalization = attention; normalization.Position = (uint)(position + count - 1);
                         gpu.Dispatch("attention_softmax", normalization, (uint)rows * 16 * 256, 256, b.Scores);
-                        if (useTiledAttention) gpu.Dispatch2D(AttentionKernel("batch_attention_values_tiled"), attention, 8 * 128, (uint)((rows + 15) / 16) * 16, 128, b.Scores, valueCache[layer], gate, query);
+                        if (Int8Kv) gpu.Dispatch("batch_attention_values_int8", attention, (uint)rows * 4096, 128, b.Scores, valueCache[layer], gate, query, valueScale[layer]);
+                        else if (useTiledAttention) gpu.Dispatch2D(AttentionKernel("batch_attention_values_tiled"), attention, 8 * 128, (uint)((rows + 15) / 16) * 16, 128, b.Scores, valueCache[layer], gate, query);
                         else gpu.Dispatch("batch_attention_values", attention, (uint)rows * 4096, 128, b.Scores, valueCache[layer], gate, query);
                     }
                 }
@@ -356,9 +365,9 @@ internal sealed partial class QwenEngine
             BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count, packedInput: fusedShared ? sharedPackedActivation : null);
             if (!earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, sigmoidOutput: gateReady);
             gpu.Dispatch((gateReady ? "batch_mix_precomputed_gate" : "batch_mix") + (bf16Output ? "_bf16_expert" : ""), new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
-            ActiveDraft?.Capture(layer, b.Hidden, count);
+            blockDraft?.Capture(layer, b.Hidden, count);
         }
-        if (!verify) ActiveDraft?.CommitFeatures(count, position);
+        if (!verify) blockDraft?.CommitFeatures(count, position);
         if (verify)
         {
             var verificationBuffers = verification!;

@@ -22,7 +22,17 @@ KV and recurrent state are FP32. The opt-in `--fast-prefill` preset uses FP16
 projection and attention operands with FP32 accumulation, softmax, KV and recurrent
 state; see the fast-prefill measurements below. `--tuned-prefill` now selects FP16
 KV storage for both target and draft; `--kv-cache-precision fp32` retains the
-previous storage for comparison. The default served window is the checkpoint's
+previous storage for comparison. Experimental `--kv-cache-precision int8` stores
+only the target KV in symmetric INT8 with FP32 per-token/head scales; the draft
+keeps FP16 KV. It selects direct INT8 online attention with FP16 Q, BF16 scaled
+probabilities and FP32 output/statistics. It remains opt-in. The tuned INT8
+attention kernel reduces native 30K prefill latency by about 4% versus the initial
+INT8 implementation and 3% versus the FP16 control; other lengths and the full
+endpoint evaluation have not been rerun for this tuning. See
+[INT8 KV storage and initial measurements](docs/INT8_KV_20261104.md),
+[30K tuning and validation](docs/INT8_30K_PREFILL_20261104.md), and the
+[fresh hotspot profile](docs/INT8_30K_NEXT_PROFILE_20261104.md).
+The default served window is the checkpoint's
 native 262144 tokens. `--context-window` can select a smaller window (1–262144).
 KV storage starts at at most 4096 tokens and grows as positions are consumed;
 requesting a large output allowance does not reserve that whole allowance in memory.
@@ -213,7 +223,13 @@ EOS, stop strings and cancellation still apply.
 Draft context is bounded by the checkpoint's 2048-token sliding window; this does
 not reduce the target's native context window. Prefix checkpoints additionally
 save the 16 MiB projected draft context. Restoring a prefix rebuilds draft KV from
-that context. The correctness-first verifier currently reserves about 503 MiB for
+that context. Batched prefill skips draft feature capture and projection for whole
+chunks outside the windows needed by upcoming prefix checkpoints and generation.
+Intersecting chunks retain their original projection shapes and precision; target
+prefill, decode and verification remain unchanged. Use `--full-draft-prefill` to
+restore full-prompt draft processing for comparison. See
+[draft prefill controls and measurements](docs/DRAFT_CONTEXT_PREFILL_20261105.md).
+The correctness-first verifier currently reserves about 503 MiB for
 per-row hybrid-state snapshots plus logits; draft weights and workspace add more
 memory. These allocations are in addition to growing target KV. No OS memory
 settings or weight precision are changed. Omit `--draft-dir` for serial decode.

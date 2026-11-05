@@ -62,5 +62,11 @@ internal sealed class DeviceAttentionWorkspace(Metal gpu) : IDisposable
         gpu.Dispatch2D("attention_online_q32_k256_s8_g8_r2", p, (uint)((rows * heads + 31) / 32) * 256, (uint)(16 / heads), 256,
             query!, halfKv ? k : key!, halfKv ? v : value!, gate, output);
     }
+    public void EncodeInt8(GpuBuffer q, GpuBuffer k, GpuBuffer v, GpuBuffer ks, GpuBuffer vs, GpuBuffer gate, GpuBuffer output, int rows, int position, bool preparedQuery = false, int tileRows = 32, int tileKeys = 256)
+    {
+        var p = new KernelArgs { M = (uint)rows, K = (uint)(position + rows), Position = (uint)position, A = OnlineGroupHeads };
+        if (!preparedQuery) gpu.Dispatch("attention_query_grouped_half", p, (uint)rows * 1024, 128, q, query!);
+        gpu.Dispatch2D(tileRows == 32 && tileKeys == 256 ? "attention_online_int8_q32_k256_r2" : $"attention_online_int8_q{tileRows}_k{tileKeys}", p, (uint)((rows * OnlineGroupHeads + tileRows - 1) / tileRows) * 256, 2, 256, query!, k, v, gate, output, ks, vs);
+    }
     public void Dispose() { query?.Dispose(); key?.Dispose(); value?.Dispose(); probability?.Dispose(); }
 }
