@@ -29,7 +29,7 @@ internal static class DispatchFusionTests
         if (denseKernel is not ("dense_affine_staged" or "dense_affine_pipeline" or "dense_affine_pipeline64")) throw new ArgumentException("Invalid dense diagnostic");
         int tileRows = denseKernel == "dense_affine_staged" ? 64 : 128;
         using var gpu = new Metal(source);
-        foreach (var (m,n,k) in new[] { (9,32,128), (17,64,256), (65,128,512), (2048,256,2048), (2048,512,2048), (2048,2048,512), (2048,2048,4096), (2048,8192,2048) }) {
+        foreach (var (m,n,k) in new[] { (9,32,128), (17,64,256), (65,128,512), (2048,256,2048), (2048,512,2048), (2048,2048,512), (2048,2048,4096), (2048,4096,2048), (2048,8192,2048), (1259,2048,512), (1259,2048,4096), (1259,8192,2048) }) {
             using var x=gpu.Allocate((ulong)m*(ulong)k*2);using var w=gpu.Allocate((ulong)n*(ulong)k);using var s=gpu.Allocate((ulong)n*(ulong)(k/64)*4);
             using var wh=gpu.Allocate((ulong)n*(ulong)k*2);using var y=gpu.Allocate((ulong)(m*n+1)*4);
             var rng=new Random(723+m+n+k);for(int i=0;i<m*k;i++)x.Values<Half>(m*k)[i]=(Half)((rng.NextDouble()*2-1)*0.5);
@@ -40,7 +40,7 @@ internal static class DispatchFusionTests
             // Independent sampled CPU dot with the baseline's FP16 operands.
             foreach(int row in new[]{0,m-1})foreach(int col in new[]{0,n/2,n-1}){double sum=0;for(int j=0;j<k;j++){int gi=col*(k/64)+j/64;float scale=BitConverter.UInt32BitsToSingle((uint)s.Values<ushort>(n*k/32)[gi*2]<<16),bias=BitConverter.UInt32BitsToSingle((uint)s.Values<ushort>(n*k/32)[gi*2+1]<<16);float weight=(float)(Half)MathF.FusedMultiplyAdd(w.Values<byte>(n*k)[col*k+j],scale,bias);sum+=(double)(float)x.Values<Half>(m*k)[row*k+j]*weight;}if(Math.Abs(reference[row*n+col]-sum)>0.0002*(1+Math.Abs(sum)))throw new Exception("Independent dense reference failed");}
             y.Values<float>(m*n+1).Fill(float.NaN);Encode(true);Check(reference,y.Values<float>(m*n+1),$"staged-{m}-{n}-{k}",0.0002);
-            if(m==2048&&runs>0)Bench(gpu,$"staged-{m}-{n}-{k}",runs,Encode);
+            if((m==2048||m==1259)&&runs>0)Bench(gpu,$"staged-{m}-{n}-{k}",runs,Encode);
         }
         foreach(int m in new[]{9,17,65,2048}) Multi(gpu,m,runs);
         foreach(int m in new[]{1,9,32,65,2048}) foreach(int position in new[]{0,8192}) Attention(gpu,m,position,runs);

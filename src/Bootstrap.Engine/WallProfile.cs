@@ -7,6 +7,28 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    public void CompareSharedGate(string prompt, int runs)
+    {
+        if (runs < 1) throw new ArgumentOutOfRangeException(nameof(runs));
+        var tokens = Tokenizer.SimpleChat(prompt); bool original = PrecomputeSharedGate;
+        int? first = null; uint[]? reference = null;
+        Console.WriteLine(JsonSerializer.Serialize(new { type = "shared_gate_fixture", prompt_tokens = tokens.Length,
+            sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))) }));
+        try {
+            for (int run = 0; run <= runs; run++) foreach (bool enabled in run % 2 == 0 ? new[] { false, true } : new[] { true, false }) {
+                PrecomputeSharedGate = enabled; ClearPrefixCache(); gpu.ResetWallTiming();
+                var watch = Stopwatch.StartNew(); var result = Generate(tokens, 1, true); double wall = watch.Elapsed.TotalMilliseconds;
+                if (first is not null && result.Tokens[0] != first) throw new Exception("Shared gate first-token mismatch");
+                first = result.Tokens[0];
+                var actual = logits.Values<uint>(Vocabulary).ToArray();
+                reference ??= actual;
+                if (!actual.SequenceEqual(reference)) throw new Exception("Shared gate final-logit bitwise mismatch");
+                Console.WriteLine(JsonSerializer.Serialize(new { type = "shared_gate_pair", run, variant = enabled ? "precomputed" : "baseline", prompt_tokens = tokens.Length,
+                    wall_ms = wall, first_token = first, logits_bitwise = true, metal_buffer_bytes = AllocatedBytes, timing = gpu.ReadWallTiming() }));
+            }
+        } finally { PrecomputeSharedGate = original; ClearPrefixCache(); }
+    }
+
     public void CompareDispatchFusion(string prompt, int runs, int[] variants)
     {
         if (runs < 1 || variants.Length == 0) throw new ArgumentException("Missing comparison runs or variants");
@@ -114,9 +136,11 @@ internal sealed partial class QwenEngine
             sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(prompt))) }));
         using var process = Process.GetCurrentProcess();
         int? expected = null;
-        for (int run = 0; run < runs + 2; run++)
+        bool timeline = Environment.GetEnvironmentVariable("BOOTSTRAP_TIMELINE_FILE") is not null;
+        if (timeline && runs != 3) throw new ArgumentException("Timeline capture requires --runs 3");
+        for (int run = 0; run < runs + (timeline ? 3 : 2); run++)
         {
-            bool samples = run == runs + 1;
+            bool samples = run == runs + (timeline ? 2 : 1);
             ClearPrefixCache();
             gpu.ResetWallTiming(samples, samples && allKernels);
             var started = DateTimeOffset.UtcNow;
@@ -129,7 +153,7 @@ internal sealed partial class QwenEngine
             if (expected is not null && first != expected) throw new Exception("Profiling changed first-token output");
             expected = first;
             Console.WriteLine(JsonSerializer.Serialize(new { type = "prefill", run, started_utc = started, completed_utc = DateTimeOffset.UtcNow,
-                mode = samples ? (allKernels ? "all_kernel_encoder_counters" : "attention_encoder_counters") : run == 0 ? "cold_first_run" : "warm_uncached",
+                mode = samples ? (allKernels ? "all_kernel_encoder_counters" : "attention_encoder_counters") : timeline && run == 4 ? "cpu_dispatch_trace" : run == 0 ? "cold_first_run" : "warm_uncached",
                 wall_ms = wall, process_cpu_ms = cpuMs, prompt_tokens = tokens.Length,
                 tokens_per_second = tokens.Length / (wall / 1000), first_token = first,
                 metal_buffer_bytes = AllocatedBytes, timing = gpu.ReadWallTiming() }));
