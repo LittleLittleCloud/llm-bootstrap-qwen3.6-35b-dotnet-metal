@@ -2,6 +2,8 @@ namespace Bootstrap.Engine;
 
 internal sealed partial class QwenEngine
 {
+    bool precomputeSharedGate;
+    public bool PrecomputeSharedGate { get => precomputeSharedGate; set { if (precomputeSharedGate != value) { ClearPrefixCache(); precomputeSharedGate = value; } } }
     string projectionPreparation = "baseline";
     public string ProjectionPreparation
     {
@@ -138,13 +140,14 @@ internal sealed partial class QwenEngine
     }
     // Reuse is explicit: the caller must have packed the same unchanged input
     // and shape, with no intervening projection using the shared scratch.
-    void BatchProject(string name, GpuBuffer input, GpuBuffer output, int count, bool reusePackedInput = false, GpuBuffer? packedInput = null)
+    void BatchProject(string name, GpuBuffer input, GpuBuffer output, int count, bool reusePackedInput = false, GpuBuffer? packedInput = null, bool sigmoidOutput = false)
     {
         var tensor = weights[name + ".weight"];
+        if (sigmoidOutput && (tensor.Shape[0] != 1 || tensor.Kind != 1)) throw new ArgumentException("Sigmoid epilogue requires scalar BF16 gate projection");
         var scales = tensor.Kind is 0 or 3 ? weights[name + ".weight_scale_inv"].Binding : (Binding)dummy;
         if (count <= VerificationCapacity)
         {
-            gpu.Dispatch("matrix_product_tiny", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, (uint)tensor.Shape[0] * 32, 128, input, tensor.Binding, scales, output);
+            gpu.Dispatch(sigmoidOutput ? "matrix_product_tiny_sigmoid" : "matrix_product_tiny", new() { N = (uint)tensor.Shape[0], M = (uint)count, K = (uint)tensor.Shape[1], Kind = tensor.Kind }, (uint)tensor.Shape[0] * 32, 128, input, tensor.Binding, scales, output);
             return;
         }
         if (PredecodedProjections && TensorOpsPrecision == "fp16" && (tensor.Shape[0] > 32 || (FastSmallProjections && tensor.Shape[0] is 1 or 32)))
@@ -162,9 +165,10 @@ internal sealed partial class QwenEngine
             else if (!staged) gpu.Dispatch("projection_unpack_half", p, p.N * p.K / 4, 128, tensor.Binding, scales, b.PackedWeights);
             if (packedInput is null && !reusePackedInput) gpu.Dispatch("projection_input_half", p, p.M * p.K / 4, 128, input, b.PackedInputs);
             if (staged) gpu.Dispatch2D("dense_affine_pipeline", p, ((p.N + 63) / 64) * 128, (p.M + 127) / 128, 128, packedInput ?? b.PackedInputs, tensor.Binding, scales, output);
-            else gpu.Dispatch2D("matrix_product_predecoded", p, ((p.N + 63) / 64) * 128, (p.M + 63) / 64, 128, packedInput ?? b.PackedInputs, packedWeight, output);
+            else gpu.Dispatch2D(sigmoidOutput ? "matrix_product_predecoded_sigmoid" : "matrix_product_predecoded", p, ((p.N + 63) / 64) * 128, (p.M + 63) / 64, 128, packedInput ?? b.PackedInputs, packedWeight, output);
             return;
         }
+        if (sigmoidOutput) throw new InvalidOperationException("Unsupported sigmoid projection path");
         bool small = tensor.Shape[0] <= 32;
         uint threads = small || (OptimizedProjections && TensorOpsPrecision == "fp16") ? 128u : 256u;
         string kernel = ProjectionKernel(small ? "matrix_product_small" : "matrix_product") + (!small && OptimizedProjections && TensorOpsPrecision == "fp16" ? "_tile" : "");
@@ -341,11 +345,12 @@ internal sealed partial class QwenEngine
             bool earlyScalar = FastSmallProjections && PredecodedProjections && count > VerificationCapacity;
             if (fusedShared || groupedShared) BatchProjectMany([prefix + ".mlp.shared_expert.gate_proj", prefix + ".mlp.shared_expert.up_proj"], [b.SharedGate, b.SharedUp], b.Norm, count, stagedExperts, fusedShared);
             else { BatchProject(prefix + ".mlp.shared_expert.gate_proj", b.Norm, b.SharedGate, count, reusePackedInput: stagedExperts); BatchProject(prefix + ".mlp.shared_expert.up_proj", b.Norm, b.SharedUp, count, reusePackedInput: true); }
-            if (earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, reusePackedInput: true);
+            bool gateReady = !verify && PrecomputeSharedGate && (earlyScalar || count <= VerificationCapacity);
+            if (earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, reusePackedInput: true, sigmoidOutput: gateReady);
             if (!fusedShared) gpu.Dispatch("silu_product", new() { N = checked((uint)count * 512) }, checked((uint)count * 512), 128, b.SharedGate, b.SharedUp, b.SharedActivation);
             BatchProject(prefix + ".mlp.shared_expert.down_proj", b.SharedActivation, b.SharedOutput, count, packedInput: fusedShared ? sharedPackedActivation : null);
-            if (!earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count);
-            gpu.Dispatch("batch_mix", new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
+            if (!earlyScalar) BatchProject(prefix + ".mlp.shared_expert_gate", b.Norm, b.SharedWeight, count, sigmoidOutput: gateReady);
+            gpu.Dispatch(gateReady ? "batch_mix_precomputed_gate" : "batch_mix", new() { M = (uint)count }, checked((uint)count * Hidden), 128, b.Hidden, b.ExpertOutput, b.Inverse, b.Rates, b.SharedOutput, b.SharedWeight, b.Hidden);
             ActiveDraft?.Capture(layer, b.Hidden, count);
         }
         if (!verify) ActiveDraft?.CommitFeatures(count, position);

@@ -21,6 +21,7 @@ if (command == "profile-dense-prefill") { DensePrefillTests.Run(File.ReadAllText
 if (command == "profile-dense-tiles") { DenseTileTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "test-dispatch-fusion") { DispatchFusionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "3"), Option("--dense-kernel") ?? "dense_affine_pipeline"); return; }
 if (command == "profile-projection-preparation") { ProjectionPreparationTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
+if (command == "test-shared-gate") { SharedGateTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-mix") { MixTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5")); return; }
 if (command == "profile-online-attention") { OnlineAttentionTests.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), Option("--case"), Option("--variants"), args.Contains("--stress"), Option("--kv-cache-precision") != "fp32"); return; }
 if (command == "compare-mlx-kernels") { KernelComparisonBenchmarks.Run(File.ReadAllText(kernelFile), Option("--family") ?? "all", int.Parse(Option("--runs") ?? "9")); return; }
@@ -33,11 +34,11 @@ if (command == "tensorops-self-test") { TensorOpsSelfTest.Run(File.ReadAllText(k
 if (command == "profile-fast-attention") { FastAttentionTests.Run(File.ReadAllText(Option("--kernel-file") ?? kernelFile), int.Parse(Option("--runs") ?? "3"), args.Contains("--attention-tiles"), Option("--kv-cache-precision") == "fp16"); return; }
 if (command == "profile-attention") { AttentionWallProfile.Run(File.ReadAllText(kernelFile), int.Parse(Option("--runs") ?? "5"), args.Contains("--tiled-attention")); return; }
 if (command == "streaming-self-test") { await StreamingSelfTest.Run(); return; }
-if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "compare-dispatch-fusion" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
+if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "compare-dispatch-fusion" or "compare-shared-gate" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test" or "tokenize" or "tokenizer-self-test")
 {
     var directory = Option("--model-dir") ?? throw new ArgumentException("--model-dir is required");
     using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestFile));
-    if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "compare-dispatch-fusion" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test")
+    if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test" or "context-self-test" or "prefix-cache-self-test" or "verification-self-test" or "draft-self-test" or "compare-prefill-variants" or "compare-decode-variants" or "compare-tensorops" or "compare-projection-preparation" or "compare-dispatch-fusion" or "compare-shared-gate" or "profile-prefill" or "profile-decode" or "moe-self-tests" or "speculation-self-test")
     {
         int contextWindow = QwenEngine.ValidateContextWindow(int.Parse(Option("--context-window") ?? QwenEngine.DefaultContextWindow.ToString()));
         bool tunedPrefill = args.Contains("--tuned-prefill");
@@ -57,6 +58,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         engine.DeltaPreparation = Option("--delta-preparation") ?? (tunedPrefill ? "fused" : "baseline");
         engine.DensePrefill = Option("--dense-prefill") ?? (tunedPrefill ? "all" : "baseline");
         engine.ProjectionPreparation = Option("--projection-preparation") ?? (tunedPrefill ? "fused" : "baseline");
+        engine.PrecomputeSharedGate = args.Contains("--precompute-shared-gate");
         engine.DispatchFusion = int.Parse(Option("--dispatch-fusion") ?? (tunedPrefill && engine.Affine8 ? "29" : "0"));
         engine.ValidateDelta = args.Contains("--validate-delta");
         engine.ExpertKernel = Option("--expert-kernel") ?? (tunedPrefill ? "fused" : "baseline");
@@ -92,6 +94,7 @@ if (command is "generate" or "serve" or "compare-prefill" or "kv-cache-self-test
         if (command == "compare-decode-variants") { engine.CompareDecodeVariants(int.Parse(Option("--runs") ?? "3")); return; }
         if (command == "compare-prefill-variants") { engine.ComparePrefillVariants(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3"), Option("--expected-answer") ?? throw new ArgumentException("--expected-answer is required"), args.Contains("--fast-variants"), args.Contains("--projection-variants"), args.Contains("--batch-variants"), args.Contains("--tuned-variants"), args.Contains("--expert-variants"), args.Contains("--final-variants"), args.Contains("--throughput-variants"), args.Contains("--online-variants"), args.Contains("--moe-variants"), args.Contains("--moe-final-variants"), args.Contains("--delta-variants"), args.Contains("--delta-final-variants")); return; }
         if (command == "compare-tensorops") { engine.CompareTensorOps(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "3")); return; }
+        if (command == "compare-shared-gate") { engine.CompareSharedGate(File.ReadAllText(Option("--prompt-file") ?? throw new ArgumentException("--prompt-file is required")), int.Parse(Option("--runs") ?? "5")); return; }
         if (command == "compare-dispatch-fusion") {
             foreach (string name in new[] { "--prompt-file", "--long-prompt-file" }) {
                 var file = Option(name); if (file is null) continue;

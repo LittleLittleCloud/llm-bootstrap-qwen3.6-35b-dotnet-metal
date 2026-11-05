@@ -218,6 +218,11 @@ kernel void expert_matrix(device const float*x [[buffer(0)]],device const uchar*
 kernel void batch_mix(device const float*residual [[buffer(0)]],device const float*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
     if(i>=p.m*2048)return;uint token=i/2048,d=i%2048;float value=residual[i]+shared[i]*sigmoid(gate[token]);for(uint e=0;e<8;++e)value+=prob[token*8+e]*expert[inverse[token*8+e]*2048+d];y[i]=value;
 }
+
+// Opt-in shared-gate epilogue experiment; keep FP32 storage and combine order.
+kernel void batch_mix_precomputed_gate(device const float*residual [[buffer(0)]],device const float*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
+    if(i>=p.m*2048)return;uint token=i/2048,d=i%2048;float value=residual[i]+shared[i]*gate[token];for(uint e=0;e<8;++e)value+=prob[token*8+e]*expert[inverse[token*8+e]*2048+d];y[i]=value;
+}
 // Four adjacent dimensions share routing metadata and the scalar shared gate.
 // Keep FP32 storage and the original left-to-right expert accumulation order.
 kernel void batch_mix_vec4(device const float4*residual [[buffer(0)]],device const float4*expert [[buffer(1)]],device const uint*inverse [[buffer(2)]],device const float*prob [[buffer(3)]],device const float4*shared [[buffer(4)]],device const float*gate [[buffer(5)]],device float4*y [[buffer(6)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {
@@ -359,6 +364,18 @@ kernel void matrix_product_tiny(device const float*x [[buffer(0)]],device const 
     }
     #pragma unroll
     for(uint r=0;r<8;++r)if(r<p.m){float4 a=accum[r];float sum=simd_sum(a.x+a.y+a.z+a.w);if(lane==0)y[r*p.n+column]=sum;}
+}
+
+// Opt-in shared-gate epilogue experiment; keep FP32 storage and combine order.
+kernel void matrix_product_tiny_sigmoid(device const float*x [[buffer(0)]],device const uchar*w [[buffer(1)]],device const ushort*s [[buffer(2)]],device float*y [[buffer(3)]],constant P&p [[buffer(15)]],uint g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
+    uint column=g/32;if(column>=p.n)return;float4 accum[8];
+    for(uint r=0;r<8;++r)accum[r]=0;
+    for(uint j=lane*4;j<p.k;j+=128){float4 weight=weight4(w,s,column,j,p.k,p.kind);
+        #pragma unroll
+        for(uint r=0;r<8;++r)if(r<p.m)accum[r]+=*((device const float4*)(x+r*p.k+j))*weight;
+    }
+    #pragma unroll
+    for(uint r=0;r<8;++r)if(r<p.m){float4 a=accum[r];float sum=simd_sum(a.x+a.y+a.z+a.w);if(lane==0)y[r*p.n+column]=sigmoid(sum);}
 }
 kernel void expert_matrix_tiny(device const float*x [[buffer(0)]],device const uchar*raw [[buffer(1)]],device const Expert*experts [[buffer(2)]],device const ExpertTile*tiles [[buffer(3)]],device const uint*tileCount [[buffer(4)]],device const uint*tokens [[buffer(5)]],device float*y [[buffer(6)]],constant P&p [[buffer(15)]],uint3 g [[thread_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {
     uint column=g.x/32;if(g.y>=tileCount[0]||column>=p.n)return;
@@ -1058,6 +1075,25 @@ kernel void matrix_product_predecoded(device half*x [[buffer(0)]],device half*w 
     #pragma unroll
     for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
     op.run(a,b,acc);acc.store(c);
+}
+
+// Opt-in shared-gate epilogue experiment; keep FP32 storage and combine order.
+kernel void matrix_product_predecoded_sigmoid(device half*x [[buffer(0)]],device half*w [[buffer(1)]],device float*y [[buffer(2)]],constant P&p [[buffer(15)]],uint3 group [[threadgroup_position_in_grid]]) {
+    constexpr auto desc=matmul2d_descriptor(64,64,dynamic_extent,false,true,false,matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc,execution_simdgroups<4>> op;
+    auto left=tensor(x,dextents<int,2>{int(p.k),int(p.m)},array<int,2>{1,int(p.k)});
+    auto right=tensor(w,dextents<int,2>{int(p.k),int(p.n)},array<int,2>{1,int(p.k)});
+    auto output=tensor(y,dextents<int,2>{int(p.n),int(p.m)},array<int,2>{1,int(p.n)});
+    auto a=left.slice(0,int(group.y)*64);auto b=right.slice(0,int(group.x)*64);auto c=output.slice(int(group.x)*64,int(group.y)*64);
+    auto acc=op.get_destination_cooperative_tensor<decltype(a),decltype(b),float>();
+    #pragma unroll
+    for(uint i=0;i<acc.get_capacity();++i)acc[i]=0;
+    op.run(a,b,acc);
+    #pragma unroll
+    for(uint i=0;i<acc.get_capacity();++i){auto ij=acc.get_multidimensional_index(i);
+        if(group.x*64+ij[0]<p.n&&group.y*64+ij[1]<p.m)acc[i]=sigmoid(float(acc[i]));
+    }
+    acc.store(c);
 }
 
 kernel void expert_unpack_half(device const uchar*raw [[buffer(0)]],device const Expert*experts [[buffer(1)]],device half*y [[buffer(2)]],constant P&p [[buffer(15)]],uint i [[thread_position_in_grid]]) {

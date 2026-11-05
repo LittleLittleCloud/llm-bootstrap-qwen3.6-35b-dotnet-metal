@@ -243,3 +243,38 @@ Whole-machine new swap-outs total 641.5 MiB over model loading and initial warmu
 **Decision:** retain mask 29. The tested fused implementations are correctness-valid on these fixtures but slower, so dispatch reduction alone does not justify enabling bit 2. K64 was rejected on isolated measurements; only K32 was measured end to end.
 
 Local evidence: `artifacts/fused-dense-retest/` contains commands, binary/source hashes, logs, all observations, memory samples, `micro.csv`, `summary.json` and `evidence-manifest.json`. Production shader SHA-256 remains `e53803cf622ed53924948abfdb312547be985cc2d2da94e25027d49e77771812`. Reproduce with `dotnet build src/Bootstrap.Engine -c Release -o artifacts/fused-dense-bin`, then `python3 scripts/test-fused-dense.py` using a fresh output location (the script refuses to overwrite existing provenance). Summarize with `python3 scripts/summarize-fused-dense.py artifacts/fused-dense-retest`. The runner reuses the pinned model/fixture commands under `artifacts/current-gap/`; these local artifacts are prerequisites.
+
+
+## Follow-up: precompute the shared-gate sigmoid
+
+Tested at base `8fa82a7`, with an opt-in `--precompute-shared-gate` experiment. The sigmoid moves from `batch_mix` into the existing scalar shared-gate projection epilogue. Tiny projections and the predecoded TensorOps projection each have a separate candidate kernel. `batch_mix_precomputed_gate` reads the resulting FP32 scalar. Expert/shared outputs, residuals and gate storage remain FP32; accumulation remains residual + shared, then the eight routed experts in the original order. No extra dispatch or model buffer is introduced. Decode and speculative verification retain their existing behavior; unsupported large-prefill projection configurations use the original path. Default remains off.
+
+### Correctness and isolated timing
+
+The diagnostic covers rows 1, 8, 9, 17, 127, 272, 1259 and 2048, random full-permutation expert routing, saturated and ordinary gates, separate output and in-place residual output. All live outputs match the original projection + combine bitwise, guard regions survive, and sampled independent CPU combine checks have maximum absolute error 1.711e-7. All 16 checks pass normally and again under Metal API/GPU validation. Build has zero warnings/errors.
+
+Nine warm observations per variant, alternating order after one excluded warmup. Values below are median GPU command-buffer times, in milliseconds. Projection + combine includes both dispatches with packed operands already resident; common input/weight preparation is excluded. The two-dispatch microsequence does not model the intervening shared down projection in the full engine.
+
+| Rows | Combine baseline | Combine precomputed | Projection + combine baseline | Projection + combine precomputed |
+|---|---:|---:|---:|---:|
+| 127 | 0.022708 | 0.022500 | 0.049833 | 0.051833 |
+| 272 | 0.052125 | 0.052125 | 0.088750 | 0.089750 |
+| 1259 | 0.395750 | 0.395333 | 0.440875 | 0.441625 |
+| 2048 | 0.643125 | 0.642875 | 0.691625 | 0.692458 |
+
+At 2048 rows, combine changes by -0.039%; including the scalar projection changes by +0.120%. Thus eliminating repeated sigmoid arithmetic does not materially accelerate this combine implementation on the tested hardware. Memory traffic is a plausible remaining bottleneck, but this experiment does not measure hardware bandwidth or prove the cause of Splash's advantage.
+
+### Same-process 30K comparison
+
+The same 29,939-token fixture and tuned mask 29 are used, with prefixes cleared on every request. Each variant warms once, then five warm pairs alternate order. No encoder counters or timeline collection are enabled. All 12 requests, including warmups, have bitwise-identical full final-logit vectors and first token 22. This is one fixture's numerical check, not a generation-quality evaluation.
+
+| Variant | Median wall, ms | Tokens/s | Median GPU command time, ms | Dispatches |
+|---|---:|---:|---:|---:|
+| Current baseline | 12689.005 | 2359.4 | 12628.808 | 16344 |
+| Precomputed sigmoid | 12679.179 | 2361.3 | 12627.147 | 16344 |
+
+Median wall latency decreases by **0.077%** (9.827 ms); median GPU time decreases only 1.661 ms out of approximately 12.63 seconds. All five paired wall differences favor the candidate by 4.876–46.769 ms, with a median paired saving of 27.263 ms. The difference of variant medians and median paired difference are distinct statistics; neither supports a substantial speedup claim. Both variants retain 39,939,244,032 bytes of Metal buffers. The first baseline warmup includes 100 resident-weight initialization dispatches (16444); subsequent requests use 16344. No new whole-machine swap-outs or thermal warnings were sampled, including loading.
+
+**Decision:** keep this experiment opt-in. It preserves this fixture's output but does not explain the large previously observed Splash combine gap. The next more promising isolated experiment is BF16 expert-output storage, retaining FP32 accumulation: at 2048 tokens, the routed output footprint would fall from 128 MiB to 64 MiB. That precision change has not been implemented or validated by this experiment.
+
+Local evidence is in `artifacts/shared-gate/`: command/environment identities, binary/source hashes, raw logs, machine samples, `micro.csv`, `summary.json`, and `evidence-manifest.json`. Reproduce with `dotnet build src/Bootstrap.Engine -c Release -o artifacts/shared-gate-bin`, then `python3 scripts/test-shared-gate.py` using a fresh output location, and summarize with `python3 scripts/summarize-shared-gate.py artifacts/shared-gate`. The runner reuses the pinned model and prompt configuration under `artifacts/current-gap/` and refuses to overwrite existing provenance.
